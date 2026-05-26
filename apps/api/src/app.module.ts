@@ -4,7 +4,19 @@ import { LoggerModule } from 'nestjs-pino';
 import { DomainErrorFilter } from './common/filters/domain-error.filter';
 import { RedisModule } from './common/redis.module';
 import { DbModule } from './db/db.module';
+import { StorageModule } from './storage/storage.module';
 import { HealthModule } from './modules/health/health.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { UsersModule } from './modules/users/users.module';
+import { FxModule } from './modules/fx/fx.module';
+import { VideosModule } from './modules/videos/videos.module';
+import { WatchModule } from './modules/watch/watch.module';
+import { SearchModule } from './modules/search/search.module';
+import { PaymentsModule } from './modules/payments/payments.module';
+import { SubscriptionsModule } from './modules/subscriptions/subscriptions.module';
+import { WalletModule } from './modules/wallet/wallet.module';
+import { StudioModule } from './modules/studio/studio.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 @Module({
   imports: [
@@ -20,7 +32,19 @@ import { HealthModule } from './modules/health/health.module';
     }),
     DbModule,
     RedisModule,
+    StorageModule,
+    NotificationsModule,
     HealthModule,
+    AuthModule,
+    UsersModule,
+    FxModule,
+    VideosModule,
+    WatchModule,
+    SearchModule,
+    PaymentsModule,
+    SubscriptionsModule,
+    WalletModule,
+    StudioModule,
   ],
   providers: [
     {
