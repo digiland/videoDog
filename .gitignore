@@ -26,3 +26,4 @@ pnpm-debug.log*
 
 # husky internals (none in v9)
 .husky/_/
+.claude/
