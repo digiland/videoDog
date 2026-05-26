@@ -11,8 +11,7 @@ CREATE TABLE fx_rates (
   effective_until timestamptz,
   notes text
 );
-CREATE INDEX fx_rates_lookup_idx ON fx_rates (base, quote, effective_from DESC)
-  WHERE effective_until IS NULL OR effective_until > now();
+CREATE INDEX fx_rates_lookup_idx ON fx_rates (base, quote, effective_from DESC);
 CREATE UNIQUE INDEX fx_rates_open_source_idx ON fx_rates (base, quote, source)
   WHERE effective_until IS NULL;
 

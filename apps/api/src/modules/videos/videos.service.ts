@@ -196,9 +196,13 @@ export class VideosService {
       .from(videos)
       .where(and(...conditions))
       .orderBy(desc(videos.publishedAt))
-      .limit(limit);
+      .limit(limit + 1);
 
-    return rows;
+    const hasMore = rows.length > limit;
+    const items = hasMore ? rows.slice(0, limit) : rows;
+    const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
+
+    return { items, next_cursor };
   }
 
   async getSignedPlaylistUrl(

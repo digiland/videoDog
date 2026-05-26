@@ -23,7 +23,7 @@ export default function CatalogClient({
   initialCursor,
   currentMode,
 }: CatalogClientProps) {
-  const [videos, setVideos] = useState<Video[]>(initialItems);
+  const [videos, setVideos] = useState<Video[]>(initialItems ?? []);
   const [cursor, setCursor] = useState<string | null>(initialCursor);
   const [activeMode, setActiveMode] = useState(currentMode);
   const [loading, setLoading] = useState(false);

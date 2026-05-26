@@ -9,14 +9,12 @@
     "useDefineForClassFields": false,
     "outDir": "./dist",
     "baseUrl": "./",
+    "rootDir": "./src",
     "incremental": false,
     "types": ["node"],
     "noUnusedLocals": false,
-    "noUnusedParameters": false,
-    "paths": {
-      "@streamzw/shared": ["../../packages/shared/src/index.ts"]
-    }
+    "noUnusedParameters": false
   },
-  "include": ["src/**/*", "../../packages/shared/src/**/*"],
+  "include": ["src/**/*"],
   "exclude": ["dist", "node_modules"]
 }
