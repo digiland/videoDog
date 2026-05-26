@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import './globals.css';
+import NavBar from './components/NavBar';
 
 export const metadata = {
   title: 'StreamZW',
@@ -9,7 +10,10 @@ export const metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body className="bg-neutral-950 text-neutral-100 min-h-screen antialiased">{children}</body>
+      <body className="bg-[#0f0f23] text-white min-h-screen antialiased">
+        <NavBar />
+        <main>{children}</main>
+      </body>
     </html>
   );
 }

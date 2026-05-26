@@ -1,35 +1,48 @@
-import { Money } from '@streamzw/shared';
+import type { VideoListResponse } from '../src/types/api';
+import CatalogClient from './components/CatalogClient';
 
-export default function HomePage() {
-  const usd = Money.of(149n, 'USD');
-  const zwg = Money.of(4470n, 'ZWG');
-  const zar = Money.of(2780n, 'ZAR');
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+
+async function fetchVideos(mode?: string): Promise<VideoListResponse> {
+  try {
+    const params = new URLSearchParams({ limit: '20', state: 'published' });
+    if (mode && mode !== 'all') params.set('mode', mode);
+    const res = await fetch(`${API_BASE}/videos?${params.toString()}`, {
+      next: { revalidate: 60 },
+    });
+    if (!res.ok) return { items: [], next_cursor: null };
+    return res.json() as Promise<VideoListResponse>;
+  } catch {
+    return { items: [], next_cursor: null };
+  }
+}
+
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ mode?: string }>;
+}) {
+  const params = await searchParams;
+  const mode = params.mode ?? 'all';
+  const data = await fetchVideos(mode);
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-8 p-8">
-      <div className="text-center">
-        <h1 className="text-5xl font-bold tracking-tight">StreamZW</h1>
-        <p className="mt-3 max-w-md text-neutral-400">
-          Creator-led video platform for Zimbabwe. Multi-currency from day one.
+    <div className="max-w-7xl mx-auto px-4 py-8">
+      {/* Hero */}
+      <div className="mb-8">
+        <h1 className="text-3xl md:text-4xl font-bold text-white">
+          Zimbabwe&apos;s Video Platform
+        </h1>
+        <p className="mt-2 text-gray-400 text-sm md:text-base">
+          Watch, support, and discover creators from Zimbabwe and the diaspora.
         </p>
       </div>
 
-      <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-5 text-sm">
-        <div className="font-mono text-xs uppercase tracking-wider text-neutral-500">
-          @streamzw/shared · Money
-        </div>
-        <div className="mt-3 flex items-center gap-4 font-mono">
-          <span>{usd.format()}</span>
-          <span className="text-neutral-700">·</span>
-          <span>{zwg.format()}</span>
-          <span className="text-neutral-700">·</span>
-          <span>{zar.format()}</span>
-        </div>
-      </div>
-
-      <div className="text-xs text-neutral-600">
-        M1 — Scaffold. API at <span className="font-mono">:3001</span>.
-      </div>
-    </main>
+      <CatalogClient
+        initialItems={data.items}
+        initialCursor={data.next_cursor}
+        currentMode={mode}
+      />
+    </div>
   );
 }
