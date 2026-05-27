@@ -1,8 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { DB, type Db } from '../../db/db.module';
-import { videos } from '../../db/schema';
+import { captions, users as schema_users, videos } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
 import { assertTransition } from './state';
@@ -169,7 +169,55 @@ export class VideosService {
       accessCheckResult = await this.access.checkAccess(null, video);
     }
 
-    return { ...video, access_check_result: accessCheckResult };
+    const creator = await this.db
+      .select({
+        id: schema_users.id,
+        handle: schema_users.handle,
+        displayName: schema_users.displayName,
+      })
+      .from(schema_users)
+      .where(eq(schema_users.id, video.ownerId))
+      .limit(1)
+      .then((rows) => rows[0]);
+
+    return {
+      ...(await this.serialize(video)),
+      creator: creator
+        ? { id: creator.id, handle: creator.handle, display_name: creator.displayName }
+        : null,
+      access_check_result: accessCheckResult,
+    };
+  }
+
+  private async serialize(v: typeof videos.$inferSelect) {
+    return {
+      id: v.id,
+      owner_id: v.ownerId,
+      title: v.title,
+      description: v.description,
+      access_mode: v.accessMode,
+      ppv_price_minor_units: v.ppvPriceMinorUnits != null ? Number(v.ppvPriceMinorUnits) : null,
+      ppv_price_currency: v.ppvPriceCurrency,
+      in_premium_pool: v.inPremiumPool,
+      state: v.state,
+      duration_seconds: v.durationSeconds,
+      hls_playlist_key: v.hlsPlaylistKey,
+      thumbnail_key: v.thumbnailKey,
+      thumbnail_url: await this.thumbnailUrl(v.thumbnailKey),
+      published_at: v.publishedAt,
+      created_at: v.createdAt,
+      updated_at: v.updatedAt,
+    };
+  }
+
+  private async thumbnailUrl(key: string | null): Promise<string | null> {
+    if (!key) return null;
+    if (/^https?:\/\//i.test(key)) return key;
+    try {
+      return await this.storage.getPresignedGetUrl(this.storage.thumbBucketName, key, 3600);
+    } catch {
+      return null;
+    }
   }
 
   async list(filters: {
@@ -199,7 +247,31 @@ export class VideosService {
       .limit(limit + 1);
 
     const hasMore = rows.length > limit;
-    const items = hasMore ? rows.slice(0, limit) : rows;
+    const slice = hasMore ? rows.slice(0, limit) : rows;
+
+    // Join creators in one shot
+    const ownerIds = Array.from(new Set(slice.map((v) => v.ownerId)));
+    const creators = ownerIds.length
+      ? await this.db
+          .select({
+            id: schema_users.id,
+            handle: schema_users.handle,
+            displayName: schema_users.displayName,
+          })
+          .from(schema_users)
+          .where(inArray(schema_users.id, ownerIds))
+      : [];
+    const byId = new Map(creators.map((c) => [c.id, c]));
+
+    const items = await Promise.all(
+      slice.map(async (v) => {
+        const c = byId.get(v.ownerId);
+        return {
+          ...(await this.serialize(v)),
+          creator: c ? { id: c.id, handle: c.handle, display_name: c.displayName } : null,
+        };
+      }),
+    );
     const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
 
     return { items, next_cursor };
@@ -217,13 +289,109 @@ export class VideosService {
     const access = await this.access.checkAccess(user, video);
     if (!access.ok) return { access_denied: true, paywall: access.paywall };
 
-    const url = await this.storage.getPresignedGetUrl(
-      this.storage.videoBucketName,
-      video.hlsPlaylistKey,
-      300, // 5 minute signed URL
+    // Pass-through full URLs (used by test seed data); otherwise treat as a
+    // storage object key and sign a 5-minute GET.
+    const url = /^https?:\/\//i.test(video.hlsPlaylistKey)
+      ? video.hlsPlaylistKey
+      : await this.storage.getPresignedGetUrl(
+          this.storage.videoBucketName,
+          video.hlsPlaylistKey,
+          300,
+        );
+
+    const captionRows = await this.db
+      .select()
+      .from(captions)
+      .where(and(eq(captions.videoId, videoId), eq(captions.ready, true)));
+
+    const signedCaptions = await Promise.all(
+      captionRows.map(async (c) => ({
+        id: c.id,
+        language: c.language,
+        label: c.label,
+        kind: c.kind,
+        is_default: c.isDefault,
+        url: await this.storage.getPresignedGetUrl(this.storage.videoBucketName, c.key, 300),
+      })),
     );
 
-    return { url };
+    return { url, captions: signedCaptions };
+  }
+
+  async listCaptions(videoId: string) {
+    const rows = await this.db.select().from(captions).where(eq(captions.videoId, videoId));
+    return rows.map((c) => ({
+      id: c.id,
+      language: c.language,
+      label: c.label,
+      kind: c.kind,
+      is_default: c.isDefault,
+      ready: c.ready,
+      created_at: c.createdAt,
+    }));
+  }
+
+  async createCaption(
+    videoId: string,
+    ownerId: string,
+    dto: { language: string; label: string; kind?: 'subtitles' | 'captions'; is_default?: boolean },
+  ) {
+    await this.getOwned(videoId, ownerId);
+
+    if (dto.is_default) {
+      await this.db
+        .update(captions)
+        .set({ isDefault: false, updatedAt: new Date() })
+        .where(and(eq(captions.videoId, videoId), eq(captions.kind, dto.kind ?? 'subtitles')));
+    }
+
+    const key = `captions/${videoId}/${dto.language}-${Date.now()}.vtt`;
+    const uploadUrl = await this.storage.getPresignedPutUrl(
+      this.storage.videoBucketName,
+      key,
+      'caption',
+      1,
+      900,
+    );
+
+    const [row] = await this.db
+      .insert(captions)
+      .values({
+        videoId,
+        language: dto.language,
+        label: dto.label,
+        kind: dto.kind ?? 'subtitles',
+        key,
+        isDefault: dto.is_default ?? false,
+        ready: false,
+      })
+      .returning();
+
+    return {
+      caption_id: row!.id,
+      upload_url: uploadUrl,
+      key,
+      content_type: 'text/vtt',
+    };
+  }
+
+  async completeCaption(videoId: string, ownerId: string, captionId: string) {
+    await this.getOwned(videoId, ownerId);
+    const [updated] = await this.db
+      .update(captions)
+      .set({ ready: true, updatedAt: new Date() })
+      .where(and(eq(captions.id, captionId), eq(captions.videoId, videoId)))
+      .returning();
+    if (!updated) throw new ResourceNotFoundError('Caption');
+    return updated;
+  }
+
+  async deleteCaption(videoId: string, ownerId: string, captionId: string) {
+    await this.getOwned(videoId, ownerId);
+    await this.db
+      .delete(captions)
+      .where(and(eq(captions.id, captionId), eq(captions.videoId, videoId)));
+    return { ok: true };
   }
 
   private async getOwned(videoId: string, ownerId: string) {

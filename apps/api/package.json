@@ -13,7 +13,9 @@
     "test:watch": "vitest",
     "migrate": "node-pg-migrate up -m ../../infra/migrations -j sql --envPath ../../.env",
     "migrate:down": "node-pg-migrate down -m ../../infra/migrations -j sql --envPath ../../.env",
-    "migrate:create": "node-pg-migrate create -m ../../infra/migrations -j sql"
+    "migrate:create": "node-pg-migrate create -m ../../infra/migrations -j sql",
+    "seed": "ts-node -T src/scripts/seed-users.ts",
+    "seed:videos": "ts-node -T src/scripts/seed-test-videos.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1053.0",

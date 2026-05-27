@@ -67,6 +67,66 @@ export class UsersService {
     return updated;
   }
 
+  async applyForCreator(id: string, pitch: string, canonicalCurrency: string) {
+    const [user] = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
+    if (!user) throw new ResourceNotFoundError('User');
+    if (user.role !== 'viewer')
+      throw new ValidationError('Only viewers can apply to become creators');
+    if (user.creatorApplicationState === 'pending')
+      throw new ValidationError('Application already pending review');
+    if (!CURRENCY_CODES.includes(canonicalCurrency as (typeof CURRENCY_CODES)[number]))
+      throw new ValidationError('Invalid canonical currency');
+
+    const [updated] = await this.db
+      .update(users)
+      .set({
+        creatorApplicationState: 'pending',
+        creatorApplicationPitch: pitch.trim(),
+        creatorApplicationAt: new Date(),
+        canonicalPricingCurrency: canonicalCurrency,
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, id))
+      .returning();
+    return updated!;
+  }
+
+  async listPendingApplications() {
+    return this.db
+      .select({
+        id: users.id,
+        phoneE164: users.phoneE164,
+        handle: users.handle,
+        displayName: users.displayName,
+        creatorApplicationPitch: users.creatorApplicationPitch,
+        creatorApplicationAt: users.creatorApplicationAt,
+        canonicalPricingCurrency: users.canonicalPricingCurrency,
+      })
+      .from(users)
+      .where(eq(users.creatorApplicationState, 'pending'))
+      .orderBy(users.creatorApplicationAt);
+  }
+
+  async decideApplication(applicantId: string, adminId: string, decision: 'approve' | 'reject') {
+    const [user] = await this.db.select().from(users).where(eq(users.id, applicantId)).limit(1);
+    if (!user) throw new ResourceNotFoundError('User');
+    if (user.creatorApplicationState !== 'pending')
+      throw new ValidationError('No pending application for this user');
+
+    const [updated] = await this.db
+      .update(users)
+      .set({
+        creatorApplicationState: decision === 'approve' ? 'approved' : 'rejected',
+        creatorApplicationDecidedAt: new Date(),
+        creatorApplicationDecidedBy: adminId,
+        ...(decision === 'approve' && { role: 'creator' }),
+        updatedAt: new Date(),
+      })
+      .where(eq(users.id, applicantId))
+      .returning();
+    return updated!;
+  }
+
   async upgradeToCreator(id: string, canonicalCurrency: string) {
     const [user] = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
     if (!user) throw new ResourceNotFoundError('User');

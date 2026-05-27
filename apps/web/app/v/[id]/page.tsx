@@ -19,14 +19,25 @@ async function getVideo(id: string): Promise<Video | null> {
   }
 }
 
-async function getPlaylist(id: string): Promise<string | null> {
+interface PlaylistWithCaptions extends PlaylistResponse {
+  url: string;
+  captions?: Array<{
+    id: string;
+    language: string;
+    label: string;
+    kind: 'subtitles' | 'captions';
+    is_default: boolean;
+    url: string;
+  }>;
+}
+
+async function getPlaylist(id: string): Promise<PlaylistWithCaptions | null> {
   try {
     const res = await fetch(`${API_BASE}/videos/${id}/playlist`, {
       cache: 'no-store',
     });
     if (!res.ok) return null;
-    const data = (await res.json()) as PlaylistResponse;
-    return data.url;
+    return (await res.json()) as PlaylistWithCaptions;
   } catch {
     return null;
   }
@@ -49,10 +60,8 @@ export default async function VideoPage({ params }: { params: Promise<{ id: stri
   const access = video.access_check_result as AccessResult | undefined;
   const canPlay = access?.ok === true;
 
-  let playlistUrl: string | null = null;
-  if (canPlay) {
-    playlistUrl = await getPlaylist(id);
-  }
+  const playlist = canPlay ? await getPlaylist(id) : null;
+  const playlistUrl = playlist?.url ?? null;
 
   const creatorName = video.creator?.display_name ?? video.creator?.handle ?? 'Creator';
 
@@ -61,7 +70,11 @@ export default async function VideoPage({ params }: { params: Promise<{ id: stri
       {/* Player or Paywall */}
       <div className="mb-6">
         {canPlay && playlistUrl ? (
-          <VideoPlayerSection src={playlistUrl} videoId={video.id} />
+          <VideoPlayerSection
+            src={playlistUrl}
+            videoId={video.id}
+            captions={playlist?.captions ?? []}
+          />
         ) : access?.ok === false ? (
           <div className="aspect-video bg-[#16213e] rounded-xl overflow-hidden relative">
             {/* Blurred thumbnail background */}

@@ -2,88 +2,83 @@ import Link from 'next/link';
 import type { Video } from '../../src/types/api';
 import { formatDuration, formatMoney } from '../../src/lib/format';
 
-const ACCESS_MODE_LABELS: Record<Video['access_mode'], string> = {
-  free: 'Free',
-  ppv: 'PPV',
-  premium: 'Premium',
-  premium_buyable: 'Buy / Sub',
-};
-
-const ACCESS_MODE_COLORS: Record<Video['access_mode'], string> = {
-  free: 'bg-green-900/60 text-green-300 border-green-700/50',
-  ppv: 'bg-yellow-900/60 text-yellow-300 border-yellow-700/50',
-  premium: 'bg-purple-900/60 text-purple-300 border-purple-700/50',
-  premium_buyable: 'bg-blue-900/60 text-blue-300 border-blue-700/50',
+const BADGE: Record<Video['access_mode'], { label: string; tone: string }> = {
+  free: { label: 'Free', tone: 'bg-ok/90 text-bg' },
+  ppv: { label: 'Rent', tone: 'bg-warn/90 text-bg' },
+  premium: { label: 'Premium', tone: 'bg-accent text-bg' },
+  premium_buyable: { label: 'Premium · Rent', tone: 'bg-accent text-bg' },
 };
 
 interface VideoCardProps {
   video: Video;
+  index?: number;
 }
 
-export default function VideoCard({ video }: VideoCardProps) {
-  const creatorName = video.creator?.display_name ?? video.creator?.handle ?? 'Creator';
+export default function VideoCard({ video, index = 0 }: VideoCardProps) {
+  const creatorName = video.creator?.display_name ?? video.creator?.handle ?? 'StreamZW';
+  const badge = BADGE[video.access_mode];
+  const showPrice =
+    (video.access_mode === 'ppv' || video.access_mode === 'premium_buyable') &&
+    video.ppv_price_minor_units &&
+    video.ppv_price_currency;
 
   return (
-    <Link href={`/v/${video.id}`} className="group block">
-      <div className="bg-[#16213e] rounded-xl border border-[#1a1a2e]/50 overflow-hidden hover:border-[#e94560]/30 transition">
-        {/* Thumbnail */}
-        <div className="relative aspect-video bg-gray-800 overflow-hidden">
-          {video.thumbnail_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={video.thumbnail_url}
-              alt={video.title}
-              className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-            />
-          ) : (
-            <div className="w-full h-full flex items-center justify-center">
-              <svg
-                className="w-12 h-12 text-gray-600"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={1.5}
-                  d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M4 6h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z"
-                />
-              </svg>
-            </div>
-          )}
+    <Link
+      href={`/v/${video.id}`}
+      className="group block fade-up"
+      style={{ animationDelay: `${Math.min(index, 8) * 40}ms` }}
+    >
+      <div className="relative aspect-video overflow-hidden bg-surface rounded-md ring-0 group-hover:ring-2 ring-accent transition">
+        {video.thumbnail_url ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={video.thumbnail_url}
+            alt={video.title}
+            className="w-full h-full object-cover transition duration-300 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-surface-2 to-surface">
+            <svg className="w-12 h-12 text-ink-dim/40" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </div>
+        )}
 
-          {/* Duration badge */}
-          {video.duration_seconds != null && (
-            <span className="absolute bottom-2 right-2 bg-black/80 text-white text-xs font-mono px-1.5 py-0.5 rounded">
-              {formatDuration(video.duration_seconds)}
-            </span>
-          )}
-
-          {/* Access mode badge */}
-          <span
-            className={`absolute top-2 left-2 text-xs font-semibold px-2 py-0.5 rounded-full border ${ACCESS_MODE_COLORS[video.access_mode]}`}
-          >
-            {ACCESS_MODE_LABELS[video.access_mode]}
-          </span>
-        </div>
-
-        {/* Info */}
-        <div className="p-3">
-          <h3 className="text-sm font-semibold text-white line-clamp-2 leading-snug">
-            {video.title}
-          </h3>
-          <div className="mt-1.5 flex items-center justify-between">
-            <span className="text-xs text-gray-400 truncate">{creatorName}</span>
-            {(video.access_mode === 'ppv' || video.access_mode === 'premium_buyable') &&
-              video.ppv_price_minor_units &&
-              video.ppv_price_currency && (
-                <span className="text-xs font-semibold text-[#e94560] shrink-0 ml-2">
-                  {formatMoney(video.ppv_price_minor_units, video.ppv_price_currency)}
-                </span>
-              )}
+        {/* Hover overlay */}
+        <div className="absolute inset-0 bg-bg/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+          <div className="w-12 h-12 rounded-full bg-ink/90 flex items-center justify-center text-bg">
+            <svg className="w-5 h-5 fill-current ml-0.5" viewBox="0 0 24 24">
+              <path d="M8 5v14l11-7z" />
+            </svg>
           </div>
         </div>
+
+        <span
+          className={`absolute top-2 left-2 ${badge.tone} text-[10px] font-bold uppercase tracking-wide px-2 py-0.5 rounded`}
+        >
+          {badge.label}
+        </span>
+
+        {video.duration_seconds != null && (
+          <span className="absolute bottom-2 right-2 bg-bg/90 text-ink text-xs font-mono px-1.5 py-0.5 rounded">
+            {formatDuration(video.duration_seconds)}
+          </span>
+        )}
+      </div>
+
+      <div className="mt-2">
+        <h3 className="font-semibold text-ink leading-snug line-clamp-2 group-hover:text-accent transition">
+          {video.title}
+        </h3>
+        <p className="text-xs text-ink-dim mt-0.5 truncate">{creatorName}</p>
+        {showPrice && (
+          <p className="text-xs text-ink-mute mt-1">
+            From{' '}
+            <span className="text-ink font-semibold">
+              {formatMoney(video.ppv_price_minor_units!, video.ppv_price_currency!)}
+            </span>
+          </p>
+        )}
       </div>
     </Link>
   );

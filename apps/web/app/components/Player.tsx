@@ -2,10 +2,20 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { api } from '../../src/lib/api';
 
+export interface CaptionTrack {
+  id: string;
+  language: string;
+  label: string;
+  kind: 'subtitles' | 'captions';
+  is_default?: boolean;
+  url: string;
+}
+
 interface PlayerProps {
   src: string;
   videoId: string;
   sessionId?: string;
+  captions?: CaptionTrack[];
 }
 
 interface HlsLevel {
@@ -13,7 +23,7 @@ interface HlsLevel {
   bitrate: number;
 }
 
-export default function Player({ src, videoId }: PlayerProps) {
+export default function Player({ src, videoId, captions = [] }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<import('hls.js').default | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -29,6 +39,19 @@ export default function Player({ src, videoId }: PlayerProps) {
   const [showControls, setShowControls] = useState(true);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const defaultCaption = captions.find((c) => c.is_default)?.id ?? null;
+  const [activeCaptionId, setActiveCaptionId] = useState<string | null>(defaultCaption);
+  const [ccMenuOpen, setCcMenuOpen] = useState(false);
+
+  function selectCaption(id: string | null) {
+    setActiveCaptionId(id);
+    setCcMenuOpen(false);
+    const video = videoRef.current;
+    if (!video) return;
+    Array.from(video.textTracks).forEach((t) => {
+      t.mode = t.id === id ? 'showing' : 'disabled';
+    });
+  }
 
   const startSession = useCallback(async () => {
     if (sessionIdRef.current) return;
@@ -71,6 +94,13 @@ export default function Player({ src, videoId }: PlayerProps) {
       if (destroyed || !video) return;
 
       if (typeof window === 'undefined') return;
+
+      // Plain MP4 / WebM — let the browser handle it directly.
+      const isHls = /\.m3u8(\?|$)/i.test(src);
+      if (!isHls) {
+        video.src = src;
+        return;
+      }
 
       // Dynamic import to avoid SSR issues
       const HlsModule = await import('hls.js');
@@ -235,7 +265,20 @@ export default function Player({ src, videoId }: PlayerProps) {
         onLoadedMetadata={handleLoadedMetadata}
         onClick={togglePlayPause}
         playsInline
-      />
+        crossOrigin="anonymous"
+      >
+        {captions.map((c) => (
+          <track
+            key={c.id}
+            id={c.id}
+            kind={c.kind}
+            label={c.label}
+            srcLang={c.language}
+            src={c.url}
+            default={c.id === defaultCaption}
+          />
+        ))}
+      </video>
 
       {/* Controls overlay */}
       <div
@@ -319,6 +362,46 @@ export default function Player({ src, videoId }: PlayerProps) {
             <span className="text-white text-xs font-mono flex-1">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
+
+            {/* CC selector */}
+            {captions.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setCcMenuOpen((v) => !v)}
+                  className={`text-xs font-bold border rounded px-2 py-1 transition ${
+                    activeCaptionId
+                      ? 'border-accent text-accent bg-accent/10'
+                      : 'border-gray-500 text-white hover:text-accent hover:border-accent'
+                  }`}
+                  aria-label="Closed captions"
+                >
+                  CC
+                </button>
+                {ccMenuOpen && (
+                  <div className="absolute bottom-full mb-2 right-0 bg-bg-elev border border-line rounded-md shadow-2xl py-1 min-w-[160px] z-10">
+                    <button
+                      onClick={() => selectCaption(null)}
+                      className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface transition ${
+                        activeCaptionId === null ? 'text-accent font-semibold' : 'text-ink-mute'
+                      }`}
+                    >
+                      Off
+                    </button>
+                    {captions.map((c) => (
+                      <button
+                        key={c.id}
+                        onClick={() => selectCaption(c.id)}
+                        className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface transition ${
+                          activeCaptionId === c.id ? 'text-accent font-semibold' : 'text-ink-mute'
+                        }`}
+                      >
+                        {c.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Quality selector */}
             {levels.length > 0 && (

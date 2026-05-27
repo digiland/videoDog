@@ -6,7 +6,7 @@ export class SmsClient {
 
   async sendOtp(to: string, code: string): Promise<void> {
     if (process.env.NODE_ENV !== 'production') {
-      this.logger.log({ to, code, channel: 'sms' }, 'OTP code (dev)');
+      process.stdout.write(`\n  OTP  ${to}  →  ${code}  (sms, dev)\n\n`);
       return;
     }
     const apiKey = process.env.SMS_API_KEY;

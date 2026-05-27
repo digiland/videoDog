@@ -29,20 +29,23 @@ export class AuthController {
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
 
     const phone = parsed.data.phone;
-    // Rate limit: 1/60s per phone, 5/hour
-    const keyMin = `otp:req:min:${phone}`;
-    const keyHour = `otp:req:hour:${phone}`;
+    // Rate limit: 1/60s per phone, 5/hour. Disabled when OTP_RATE_LIMIT=off (dev).
+    if (process.env.OTP_RATE_LIMIT !== 'off') {
+      const keyMin = `otp:req:min:${phone}`;
+      const keyHour = `otp:req:hour:${phone}`;
 
-    const [countMin, countHour] = await Promise.all([
-      this.redis.incr(keyMin),
-      this.redis.incr(keyHour),
-    ]);
+      const [countMin, countHour] = await Promise.all([
+        this.redis.incr(keyMin),
+        this.redis.incr(keyHour),
+      ]);
 
-    if (countMin === 1) await this.redis.expire(keyMin, 60);
-    if (countHour === 1) await this.redis.expire(keyHour, 3600);
+      if (countMin === 1) await this.redis.expire(keyMin, 60);
+      if (countHour === 1) await this.redis.expire(keyHour, 3600);
 
-    if (countMin > 1) throw new ValidationError('Rate limit: wait 60 seconds between OTP requests');
-    if (countHour > 5) throw new ValidationError('Rate limit: max 5 OTP requests per hour');
+      if (countMin > 1)
+        throw new ValidationError('Rate limit: wait 60 seconds between OTP requests');
+      if (countHour > 5) throw new ValidationError('Rate limit: max 5 OTP requests per hour');
+    }
 
     await this.auth.requestOtp(phone);
   }

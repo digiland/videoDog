@@ -18,14 +18,22 @@ export function getRefreshToken(): string | undefined {
   );
 }
 
+function emitAuthChange(): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new Event('streamzw:auth-change'));
+  }
+}
+
 export function setTokens(access: string, refresh: string): void {
   Cookies.set('access_token', access, { expires: 1 / 96 }); // 15 min
   Cookies.set('refresh_token', refresh, { expires: 30 });
+  emitAuthChange();
 }
 
 export function clearTokens(): void {
   Cookies.remove('access_token');
   Cookies.remove('refresh_token');
+  emitAuthChange();
 }
 
 export function isAuthenticated(): boolean {

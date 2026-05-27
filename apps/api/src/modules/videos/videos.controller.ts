@@ -1,4 +1,15 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { JwtGuard } from '../auth/jwt.guard';
 import { RequireAuthGuard } from '../auth/require-auth.guard';
 import { Roles } from '../auth/roles.guard';
@@ -78,5 +89,52 @@ export class VideosController {
   async playlist(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
     const user = req.user?.id ? { id: req.user.id, preferredDisplayCurrency: 'USD' } : null;
     return this.videos.getSignedPlaylistUrl(id, user);
+  }
+
+  @Get(':id/captions')
+  async listCaptions(@Param('id') id: string) {
+    return { items: await this.videos.listCaptions(id) };
+  }
+
+  @Post(':id/captions')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async createCaption(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    const parsed = z
+      .object({
+        language: z.string().min(2).max(10),
+        label: z.string().min(1).max(60),
+        kind: z.enum(['subtitles', 'captions']).optional(),
+        is_default: z.boolean().optional(),
+      })
+      .safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    return this.videos.createCaption(id, req.user.id, parsed.data);
+  }
+
+  @Post(':id/captions/:captionId/complete')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async completeCaption(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('captionId') captionId: string,
+  ) {
+    return this.videos.completeCaption(id, req.user.id, captionId);
+  }
+
+  @Delete(':id/captions/:captionId')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async deleteCaption(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('captionId') captionId: string,
+  ) {
+    return this.videos.deleteCaption(id, req.user.id, captionId);
   }
 }

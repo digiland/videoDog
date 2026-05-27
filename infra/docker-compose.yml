@@ -34,7 +34,8 @@ services:
       timeout: 5s
       retries: 5
 
-  # Object storage: uses the host's existing RustFS instance at :9000 (S3-compatible).
+  # Object storage: uses the host's RustFS instance at :9000 (S3-compatible).
+  # No container is run here — the api service reaches the host via host.docker.internal.
   # Buckets streamzw-videos and streamzw-thumbs must exist — run infra/scripts/init-buckets.sh once.
 
   api:
@@ -52,7 +53,7 @@ services:
       PORT: 3001
       DATABASE_URL: postgres://streamzw:streamzw@postgres:5432/streamzw
       REDIS_URL: redis://redis:6379
-      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://host.docker.internal:9000}
       MINIO_ACCESS_KEY: ${S3_ACCESS_KEY:-admin}
       MINIO_SECRET_KEY: ${S3_SECRET_KEY:-admin1234}
       MINIO_BUCKET_VIDEOS: ${MINIO_BUCKET_VIDEOS:-streamzw-videos}

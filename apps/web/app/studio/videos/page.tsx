@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { api } from '../../../src/lib/api';
 import type { Video } from '../../../src/types/api';
 import { formatDuration, formatMoney } from '../../../src/lib/format';
@@ -296,6 +297,12 @@ export default function StudioVideosPage() {
                     >
                       Edit
                     </button>
+                    <Link
+                      href={`/studio/videos/${video.id}/captions`}
+                      className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition"
+                    >
+                      Captions
+                    </Link>
                     {video.state === 'ready' || video.state === 'unpublished' ? (
                       <button
                         onClick={() => void handlePublish(video.id)}

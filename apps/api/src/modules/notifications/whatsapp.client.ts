@@ -6,7 +6,7 @@ export class WhatsAppClient {
 
   async sendOtp(to: string, code: string): Promise<void> {
     if (process.env.NODE_ENV !== 'production') {
-      this.logger.log({ to, code, channel: 'whatsapp' }, 'OTP code (dev)');
+      process.stdout.write(`\n  OTP  ${to}  →  ${code}  (whatsapp, dev)\n\n`);
       return;
     }
     const phoneId = process.env.WHATSAPP_PHONE_ID;
