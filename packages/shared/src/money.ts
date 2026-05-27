@@ -68,29 +68,42 @@ export class Money {
   }
 
   /**
+   * Convert currency using a snapshotted FxRate with bigint precision.
+   * Eliminates float math on money (Invariant §3.1, §3.2).
+   */
+  convert(rate: FxRate, targetCurrency: CurrencyCode): Money {
+    if (this.currency === targetCurrency) return new Money(this.amount, targetCurrency);
+
+    const SCALE = 10_000_000_000n; // 10^10 for Postgres numeric(20,10)
+    const rateVal = parseRateToBigInt(rate.rate);
+
+    if (rate.base === this.currency && rate.quote === targetCurrency) {
+      // Multiply: target = source * rate
+      const product = this.amount * rateVal;
+      const halved = SCALE / 2n;
+      const rounded = product >= 0n ? (product + halved) / SCALE : -((-product + halved) / SCALE);
+      return new Money(rounded, targetCurrency);
+    } else if (rate.base === targetCurrency && rate.quote === this.currency) {
+      // Divide: target = source / rate
+      if (rateVal === 0n) throw new RangeError('FxRate.rate cannot be zero');
+      const numerator = this.amount * SCALE;
+      const halved = rateVal / 2n;
+      const rounded =
+        numerator >= 0n ? (numerator + halved) / rateVal : -((-numerator + halved) / rateVal);
+      return new Money(rounded, targetCurrency);
+    } else {
+      throw new Error(
+        `FxRate ${rate.base}->${rate.quote} cannot convert ${this.currency} to ${targetCurrency}`,
+      );
+    }
+  }
+
+  /**
    * Convert to USD using a snapshotted FxRate (caller is responsible for storing `rate.id`
    * alongside the resulting amount per invariant §3.4).
    */
   toUsdEquivalent(rate: FxRate): Money {
-    if (this.currency === 'USD') return new Money(this.amount, 'USD');
-
-    let factor: number;
-    if (rate.base === this.currency && rate.quote === 'USD') {
-      factor = parseFloat(rate.rate);
-    } else if (rate.base === 'USD' && rate.quote === this.currency) {
-      const r = parseFloat(rate.rate);
-      if (r === 0) throw new RangeError('FxRate.rate cannot be zero');
-      factor = 1 / r;
-    } else {
-      throw new Error(`FxRate ${rate.base}->${rate.quote} cannot convert ${this.currency} to USD`);
-    }
-
-    const SCALE = 1_000_000_000n;
-    const scaled = BigInt(Math.round(factor * 1e9));
-    const product = this.amount * scaled;
-    const halved = SCALE / 2n;
-    const rounded = product >= 0n ? (product + halved) / SCALE : -((-product + halved) / SCALE);
-    return new Money(rounded, 'USD');
+    return this.convert(rate, 'USD');
   }
 
   format(): string {
@@ -117,4 +130,12 @@ export class Money {
   toJSON(): { amount_minor: string; currency: CurrencyCode } {
     return { amount_minor: this.amount.toString(), currency: this.currency };
   }
+}
+
+function parseRateToBigInt(rateStr: string): bigint {
+  const parts = rateStr.split('.');
+  const integerPart = parts[0] || '0';
+  let fractionalPart = parts[1] || '';
+  fractionalPart = fractionalPart.padEnd(10, '0').slice(0, 10);
+  return BigInt(integerPart + fractionalPart);
 }

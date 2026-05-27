@@ -13,6 +13,7 @@ type VideoForAccess = {
   inPremiumPool: boolean | null;
   ppvPriceMinorUnits: string | null;
   ppvPriceCurrency: string | null;
+  ownerId?: string;
 };
 
 export interface PlanQuote {
@@ -40,6 +41,7 @@ export class AccessService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   async checkAccess(user: User | null, video: VideoForAccess): Promise<AccessResult> {
+    if (user && video.ownerId === user.id) return { ok: true };
     if (video.accessMode === 'free') return { ok: true };
 
     if (user) {

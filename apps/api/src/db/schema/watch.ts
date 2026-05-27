@@ -15,6 +15,7 @@ export const watchSessions = pgTable(
       .references(() => videos.id),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
     lastHeartbeat: timestamp('last_heartbeat', { withTimezone: true }).notNull().defaultNow(),
+    heartbeatCount: integer('heartbeat_count').notNull().default(0),
     minutesWatched: integer('minutes_watched').notNull().default(0),
     ended: boolean('ended').notNull().default(false),
   },

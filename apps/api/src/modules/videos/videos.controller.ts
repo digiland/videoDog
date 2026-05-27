@@ -132,4 +132,35 @@ export class VideosController {
   ) {
     return this.videos.deleteCaption(id, req.user.id, captionId);
   }
+
+  @Post(':id/thumbnail')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async getThumbnailUploadUrl(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.videos.getThumbnailUploadUrl(id, req.user.id);
+  }
+
+  @Post(':id/thumbnail/complete')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async completeThumbnailUpload(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() body: unknown,
+  ) {
+    const parsed = z.object({ key: z.string().min(1) }).safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    return this.videos.completeThumbnailUpload(id, req.user.id, parsed.data.key);
+  }
+}
+
+@Controller('purchases')
+@UseGuards(JwtGuard, RequireAuthGuard)
+export class PurchasesController {
+  constructor(private readonly videos: VideosService) {}
+
+  @Post()
+  async create(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
+    return this.videos.createPurchase(req.user.id, body);
+  }
 }

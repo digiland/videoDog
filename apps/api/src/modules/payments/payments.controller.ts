@@ -21,7 +21,7 @@ export class PaymentsController {
     @Headers('x-ecocash-signature') sig: string,
     @Body() body: unknown,
   ) {
-    const payload = JSON.stringify(body);
+    const payload = (req as any).rawBody?.toString('utf8') ?? JSON.stringify(body);
     const currency = (body as { currency?: string })?.currency ?? 'USD';
     const provider = currency === 'ZWG' ? 'ecocash_zwg' : 'ecocash_usd';
     return this.payments.handleEcocashWebhook(payload, sig ?? '', provider);

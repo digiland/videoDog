@@ -2,11 +2,12 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { DB, type Db } from '../../db/db.module';
-import { captions, users as schema_users, videos } from '../../db/schema';
+import { captions, users as schema_users, videos, purchases } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
 import { assertTransition } from './state';
-import { originalKey } from '@streamzw/shared';
+import { originalKey, Money } from '@streamzw/shared';
+import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
 
@@ -404,5 +405,122 @@ export class VideosService {
       .limit(1);
     if (!video) throw new ResourceNotFoundError('Video');
     return video;
+  }
+
+  async createPurchase(userId: string, body: unknown) {
+    const CreatePurchaseSchema = z.object({
+      video_id: z.string().uuid(),
+      payment_currency: z.enum(['USD', 'ZWG', 'ZAR']),
+    });
+
+    const parsed = CreatePurchaseSchema.safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    const dto = parsed.data;
+
+    const [video] = await this.db.select().from(videos).where(eq(videos.id, dto.video_id)).limit(1);
+    if (!video) throw new ResourceNotFoundError('Video');
+
+    if (video.accessMode !== 'ppv' && video.accessMode !== 'premium_buyable') {
+      throw new ValidationError('Video is not available for individual purchase');
+    }
+
+    // Check if already purchased
+    const [existing] = await this.db
+      .select()
+      .from(purchases)
+      .where(and(eq(purchases.userId, userId), eq(purchases.videoId, dto.video_id)))
+      .limit(1);
+
+    if (existing) {
+      if (existing.state === 'completed') {
+        throw new ValidationError('Video already purchased');
+      }
+    }
+
+    const paymentCurrency = dto.payment_currency as CurrencyCode;
+    const baseMoney = new Money(
+      BigInt(video.ppvPriceMinorUnits!),
+      video.ppvPriceCurrency as CurrencyCode,
+    );
+
+    let chargedAmount: Money;
+    let usdEquiv: Money;
+    let fxRateId: string | null = null;
+
+    if (paymentCurrency === video.ppvPriceCurrency) {
+      chargedAmount = baseMoney;
+      usdEquiv =
+        baseMoney.currency === 'USD'
+          ? baseMoney
+          : await (async () => {
+              const r = await this.fx.convertToUsd(baseMoney);
+              fxRateId = r.fxRate.id === 'identity' ? null : r.fxRate.id;
+              return r.usd;
+            })();
+    } else {
+      const rate = await this.fx.rate(video.ppvPriceCurrency as CurrencyCode, paymentCurrency);
+      fxRateId = rate.id === 'identity' ? null : rate.id;
+      chargedAmount = baseMoney.convert(rate, paymentCurrency);
+      const usdResult = await this.fx.convertToUsd(chargedAmount);
+      usdEquiv = usdResult.usd;
+      if (!fxRateId && usdResult.fxRate.id !== 'identity') fxRateId = usdResult.fxRate.id;
+    }
+
+    const [row] = await this.db
+      .insert(purchases)
+      .values({
+        userId,
+        videoId: video.id,
+        state: 'pending',
+        paidAmountMinor: String(chargedAmount.amount),
+        paidCurrency: paymentCurrency,
+        usdEquivalentMinor: String(usdEquiv.amount),
+        fxRateId,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [purchases.userId, purchases.videoId],
+        set: {
+          state: 'pending',
+          paidAmountMinor: String(chargedAmount.amount),
+          paidCurrency: paymentCurrency,
+          usdEquivalentMinor: String(usdEquiv.amount),
+          fxRateId,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+
+    return {
+      purchase_id: row!.id,
+      paid_amount: chargedAmount.toJSON(),
+      usd_equivalent: usdEquiv.toJSON(),
+    };
+  }
+
+  async getThumbnailUploadUrl(videoId: string, ownerId: string) {
+    await this.getOwned(videoId, ownerId);
+    const key = `thumbnails/${videoId}-${Date.now()}.jpg`;
+    const uploadUrl = await this.storage.getPresignedPutUrl(
+      this.storage.thumbBucketName,
+      key,
+      3600,
+    );
+    return { upload_url: uploadUrl, key };
+  }
+
+  async completeThumbnailUpload(videoId: string, ownerId: string, key: string) {
+    await this.getOwned(videoId, ownerId);
+
+    const exists = await this.storage.objectExists(this.storage.thumbBucketName, key);
+    if (!exists) throw new ValidationError('Thumbnail file not uploaded to storage yet');
+
+    const [updated] = await this.db
+      .update(videos)
+      .set({ thumbnailKey: key, updatedAt: new Date() })
+      .where(eq(videos.id, videoId))
+      .returning();
+
+    return this.serialize(updated!);
   }
 }

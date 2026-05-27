@@ -21,6 +21,7 @@ export const purchaseState = pgEnum('purchase_state', [
   'failed',
 ]);
 export const subscriptionState = pgEnum('subscription_state', [
+  'pending',
   'active',
   'expired',
   'cancelled',

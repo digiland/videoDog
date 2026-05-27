@@ -12,7 +12,7 @@ import { createWatchAggregateWorker } from './workers/watch-aggregate.worker';
 import { createPremiumPoolWorker } from './workers/premium-pool.worker';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   app.useLogger(app.get(Logger));
   const origins = (process.env.CORS_ORIGINS ?? 'http://localhost:3030,http://localhost:3000')
     .split(',')

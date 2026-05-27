@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, desc } from 'drizzle-orm';
+import { and, eq, gte, lte, desc, inArray } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { accounts, ledgerEntries, payouts } from '../../db/schema';
 import { LedgerService } from '../payments/ledger.service';
@@ -65,7 +65,8 @@ export class WalletService {
 
     if (userAccounts.length === 0) return { entries: [] };
 
-    const conditions = [...userAccounts.map((acc) => eq(ledgerEntries.accountId, acc.id))];
+    const ids = userAccounts.map((acc) => acc.id);
+    const conditions = [inArray(ledgerEntries.accountId, ids)];
     if (from) conditions.push(gte(ledgerEntries.occurredAt, from));
     if (to) conditions.push(lte(ledgerEntries.occurredAt, to));
 

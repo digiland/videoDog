@@ -362,11 +362,33 @@ export class PaymentsService {
   }
 
   private async settleSubscription(payment: typeof payments.$inferSelect) {
-    const { subscriptions: subsTable } = await import('../../db/schema');
+    const { subscriptions: subsTable, subscriptionPlans } = await import('../../db/schema');
+    const [sub] = await this.db
+      .select()
+      .from(subsTable)
+      .where(eq(subsTable.id, payment.intentRefId!))
+      .limit(1);
+
+    if (!sub) return;
+
+    const [plan] = await this.db
+      .select()
+      .from(subscriptionPlans)
+      .where(eq(subscriptionPlans.id, sub.planId!))
+      .limit(1);
+
+    if (!plan) return;
+
+    const now = new Date();
+    // Extend from current expiration date if it is in the future, otherwise from now
+    const currentExpires = sub.expiresAt ? new Date(sub.expiresAt) : now;
+    const baseDate = currentExpires > now ? currentExpires : now;
+    const expiresAt = new Date(baseDate.getTime() + plan.durationDays * 24 * 60 * 60 * 1000);
+
     await this.db
       .update(subsTable)
-      .set({ state: 'active', startedAt: new Date(), updatedAt: new Date() })
-      .where(eq(subsTable.id, payment.intentRefId!));
+      .set({ state: 'active', startedAt: now, expiresAt, updatedAt: now })
+      .where(eq(subsTable.id, sub.id));
 
     const paidAmount = BigInt(payment.amountMinor);
     const paidCurrency = payment.currency as CurrencyCode;
@@ -503,6 +525,93 @@ export class PaymentsService {
           usdEquivalentMinor: paidAmount,
           fxRateId,
           refType: 'tip',
+          refId: payment.id,
+        },
+        {
+          accountId: creatorAcc,
+          debitMinor: 0n,
+          creditMinor: creatorTip.amount,
+          currency: 'USD',
+          usdEquivalentMinor: creatorTip.amount,
+          fxRateId,
+          refType: 'tip',
+          refId: payment.id,
+        },
+        {
+          accountId: platformAcc,
+          debitMinor: 0n,
+          creditMinor: platformTip.amount,
+          currency: 'USD',
+          usdEquivalentMinor: platformTip.amount,
+          fxRateId,
+          refType: 'tip',
+          refId: payment.id,
+        },
+      ]);
+    } else {
+      const [payRecvAcc, fxHoldingNonUsd, fxHoldingUsd, creatorAcc, platformAcc] =
+        await Promise.all([
+          this.ledger.findOrCreateAccount({
+            scope: 'system',
+            code: 'payment_received',
+            currency: paidCurrency,
+          }),
+          this.ledger.findOrCreateAccount({
+            scope: 'system',
+            code: 'fx_holding',
+            currency: paidCurrency,
+          }),
+          this.ledger.findOrCreateAccount({ scope: 'system', code: 'fx_holding', currency: 'USD' }),
+          this.ledger.findOrCreateAccount({
+            scope: 'system',
+            code: 'tips_clearing',
+            currency: 'USD',
+          }),
+          this.ledger.findOrCreateAccount({
+            scope: 'system',
+            code: 'platform_revenue',
+            currency: 'USD',
+          }),
+        ]);
+
+      // Tx 1: receipt
+      await this.ledger.recordTransaction([
+        {
+          accountId: payRecvAcc,
+          debitMinor: paidAmount,
+          creditMinor: 0n,
+          currency: paidCurrency,
+          usdEquivalentMinor: usdEquiv,
+          fxRateId,
+          refType: 'tip',
+          refId: payment.id,
+        },
+        {
+          accountId: fxHoldingNonUsd,
+          debitMinor: 0n,
+          creditMinor: paidAmount,
+          currency: paidCurrency,
+          usdEquivalentMinor: usdEquiv,
+          fxRateId,
+          refType: 'tip',
+          refId: payment.id,
+        },
+      ]);
+
+      // Tx 2: FX conversion to USD
+      const usdMoney = new Money(usdEquiv, 'USD');
+      const platformTip = usdMoney.mul(TIP_PLATFORM_SHARE);
+      const creatorTip = new Money(usdEquiv - platformTip.amount, 'USD');
+
+      await this.ledger.recordTransaction([
+        {
+          accountId: fxHoldingUsd,
+          debitMinor: usdEquiv,
+          creditMinor: 0n,
+          currency: 'USD',
+          usdEquivalentMinor: usdEquiv,
+          fxRateId,
+          refType: 'fx_conversion',
           refId: payment.id,
         },
         {

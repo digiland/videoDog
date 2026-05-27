@@ -1,7 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, lte, desc } from 'drizzle-orm';
+import { randomUUID } from 'crypto';
 import { DB, type Db } from '../../db/db.module';
-import { subscriptions, subscriptionPlans } from '../../db/schema';
+import { subscriptions, subscriptionPlans, payments } from '../../db/schema';
 import { FxService } from '../fx/fx.service';
 import { Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
@@ -36,10 +36,7 @@ export class SubscriptionsService {
         if (displayCurrency !== plan.baseCurrency) {
           try {
             const rate = await this.fx.rate(plan.baseCurrency as CurrencyCode, displayCurrency);
-            const converted = new Money(
-              BigInt(Math.round(Number(baseMoney.amount) * parseFloat(rate.rate))),
-              displayCurrency,
-            );
+            const converted = baseMoney.convert(rate, displayCurrency);
             displayPrice = converted.toJSON();
           } catch {
             // Fall back to base price on FX error
@@ -93,10 +90,7 @@ export class SubscriptionsService {
     } else {
       const rate = await this.fx.rate(plan.baseCurrency as CurrencyCode, paymentCurrency);
       fxRateId = rate.id === 'identity' ? null : rate.id;
-      chargedAmount = new Money(
-        BigInt(Math.round(Number(baseMoney.amount) * parseFloat(rate.rate))),
-        paymentCurrency,
-      );
+      chargedAmount = baseMoney.convert(rate, paymentCurrency);
       const usdResult = await this.fx.convertToUsd(chargedAmount);
       usdEquiv = usdResult.usd;
       if (!fxRateId && usdResult.fxRate.id !== 'identity') fxRateId = usdResult.fxRate.id;
@@ -110,12 +104,12 @@ export class SubscriptionsService {
       .values({
         userId,
         planId: plan.id,
-        state: 'active', // will be set to active after payment confirms
+        state: 'pending',
         chargedAmountMinor: String(chargedAmount.amount),
         chargedCurrency: paymentCurrency,
         usdEquivalentMinor: String(usdEquiv.amount),
         fxRateId,
-        startedAt: now,
+        startedAt: null,
         expiresAt,
         autoRenew: true,
       })
@@ -186,5 +180,76 @@ export class SubscriptionsService {
       )
       .limit(1);
     return !!row;
+  }
+
+  async processRenewals() {
+    const now = new Date();
+    // 1. Find expired active subscriptions with autoRenew = true
+    const expiredActive = await this.db
+      .select()
+      .from(subscriptions)
+      .where(
+        and(
+          eq(subscriptions.state, 'active'),
+          lte(subscriptions.expiresAt, now),
+          eq(subscriptions.autoRenew, true),
+        ),
+      );
+
+    for (const sub of expiredActive) {
+      // Transition to past_due (grace period start)
+      await this.db
+        .update(subscriptions)
+        .set({ state: 'past_due', updatedAt: now })
+        .where(eq(subscriptions.id, sub.id));
+
+      // Find the last completed payment to clone MSISDN/provider
+      const [lastPayment] = await this.db
+        .select()
+        .from(payments)
+        .where(
+          and(
+            eq(payments.intent, 'subscription'),
+            eq(payments.intentRefId, sub.id),
+            eq(payments.state, 'completed'),
+          ),
+        )
+        .orderBy(desc(payments.createdAt))
+        .limit(1);
+
+      if (lastPayment) {
+        const idempotencyKey = `renew-${sub.id}-${now.toISOString().slice(0, 10)}`;
+        // Check if renewal payment already exists for today to avoid duplicate runs
+        const [existingPayment] = await this.db
+          .select()
+          .from(payments)
+          .where(eq(payments.idempotencyKey, idempotencyKey))
+          .limit(1);
+
+        if (!existingPayment) {
+          const providerRef = `renew-ref-${randomUUID()}`;
+          await this.db.insert(payments).values({
+            userId: sub.userId,
+            provider: lastPayment.provider,
+            amountMinor: sub.chargedAmountMinor,
+            currency: sub.chargedCurrency,
+            usdEquivalentMinor: sub.usdEquivalentMinor,
+            fxRateId: sub.fxRateId,
+            intent: 'subscription',
+            intentRefId: sub.id,
+            state: 'pending',
+            idempotencyKey,
+            providerRef,
+          });
+        }
+      }
+    }
+
+    // 2. Find subscriptions in past_due that have exceeded the 3-day grace period
+    const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+    await this.db
+      .update(subscriptions)
+      .set({ state: 'expired', updatedAt: now })
+      .where(and(eq(subscriptions.state, 'past_due'), lte(subscriptions.expiresAt, threeDaysAgo)));
   }
 }

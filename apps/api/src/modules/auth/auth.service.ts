@@ -50,7 +50,8 @@ export class AuthService {
     }
 
     if (!user) throw new Error('Failed to upsert user');
-    return this.issueTokens(user.id, user.role);
+    const { pair } = await this.issueTokens(user.id, user.role);
+    return pair;
   }
 
   async refreshTokens(rawRefreshToken: string): Promise<TokenPair> {
@@ -74,7 +75,6 @@ export class AuthService {
       throw new AuthTokenReusedError();
     }
 
-    const hash = await bcrypt.hash(rawRefreshToken, 10);
     const storedHash = record.tokenHash;
     const valid = await bcrypt.compare(rawRefreshToken, storedHash).catch(() => false);
     if (!valid) throw new AuthTokenInvalidError();
@@ -83,31 +83,14 @@ export class AuthService {
     const [user] = await this.db.select().from(users).where(eq(users.id, record.userId)).limit(1);
     if (!user) throw new AuthTokenInvalidError();
 
-    const pair = await this.issueTokens(user.id, user.role);
+    const { pair, tokenId: newTokenId } = await this.issueTokens(user.id, user.role);
 
-    // Mark old token as rotated to new (we need to get the new token id)
-    // New token was just created in issueTokens; find it
-    const [newToken] = await this.db
-      .select()
-      .from(refreshTokens)
-      .where(
-        and(
-          eq(refreshTokens.userId, user.id),
-          isNull(refreshTokens.rotatedTo),
-          isNull(refreshTokens.revokedAt),
-        ),
-      )
-      .orderBy(refreshTokens.createdAt)
-      .limit(1);
+    // Mark old token as rotated to new
+    await this.db
+      .update(refreshTokens)
+      .set({ rotatedTo: newTokenId })
+      .where(eq(refreshTokens.id, record.id));
 
-    if (newToken) {
-      await this.db
-        .update(refreshTokens)
-        .set({ rotatedTo: newToken.id })
-        .where(eq(refreshTokens.id, record.id));
-    }
-
-    void hash; // suppress unused var warning
     return pair;
   }
 
@@ -123,7 +106,10 @@ export class AuthService {
     }
   }
 
-  private async issueTokens(userId: string, role: string): Promise<TokenPair> {
+  private async issueTokens(
+    userId: string,
+    role: string,
+  ): Promise<{ pair: TokenPair; tokenId: string }> {
     const tokenId = randomUUID();
     const expiresAt = new Date(Date.now() + REFRESH_TTL_DAYS * 24 * 60 * 60 * 1000);
 
@@ -138,7 +124,7 @@ export class AuthService {
       expiresAt,
     });
 
-    return { access_token: accessToken, refresh_token: refreshToken };
+    return { pair: { access_token: accessToken, refresh_token: refreshToken }, tokenId };
   }
 
   private async revokeChain(tokenId: string): Promise<void> {

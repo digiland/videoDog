@@ -19,18 +19,21 @@ export default function StudioVideosPage() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [editForm, setEditForm] = useState<{
     title: string;
     description: string;
     access_mode: Video['access_mode'];
     ppv_price: string;
     ppv_currency: string;
+    comments_enabled: boolean;
   }>({
     title: '',
     description: '',
     access_mode: 'free',
     ppv_price: '',
     ppv_currency: 'USD',
+    comments_enabled: true,
   });
 
   useEffect(() => {
@@ -89,16 +92,31 @@ export default function StudioVideosPage() {
         ? String(Number(video.ppv_price_minor_units) / 100)
         : '',
       ppv_currency: video.ppv_price_currency ?? 'USD',
+      comments_enabled: video.comments_enabled !== false,
     });
   }
 
   async function handleSaveEdit(id: string) {
     setActionLoading(id);
     try {
+      if (thumbnailFile) {
+        const { upload_url, key } = await api.post<{ upload_url: string; key: string }>(
+          `/videos/${id}/thumbnail`,
+        );
+        const put = await fetch(upload_url, {
+          method: 'PUT',
+          headers: { 'content-type': thumbnailFile.type },
+          body: thumbnailFile,
+        });
+        if (!put.ok) throw new Error('Thumbnail upload failed');
+        await api.post(`/videos/${id}/thumbnail/complete`, { key });
+      }
+
       const body: Record<string, unknown> = {
         title: editForm.title,
         description: editForm.description || null,
         access_mode: editForm.access_mode,
+        comments_enabled: editForm.comments_enabled,
       };
       if (editForm.access_mode === 'ppv' || editForm.access_mode === 'premium_buyable') {
         body.ppv_price_minor_units = Math.round(parseFloat(editForm.ppv_price) * 100);
@@ -106,9 +124,10 @@ export default function StudioVideosPage() {
       }
       await api.patch(`/videos/${id}`, body);
       setEditingId(null);
+      setThumbnailFile(null);
       await loadVideos();
-    } catch {
-      // ignore
+    } catch (err: any) {
+      alert(err.message || 'Failed to save changes');
     } finally {
       setActionLoading(null);
     }
@@ -216,6 +235,32 @@ export default function StudioVideosPage() {
                         </select>
                       </>
                     )}
+                  </div>
+                  <div className="flex gap-4 items-center mt-2 flex-wrap">
+                    <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={editForm.comments_enabled}
+                        onChange={(e) =>
+                          setEditForm((f) => ({ ...f, comments_enabled: e.target.checked }))
+                        }
+                        className="accent-[#e94560]"
+                      />
+                      Enable Comments
+                    </label>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-gray-300 font-medium">Custom Thumbnail:</span>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png"
+                        onChange={(e) => {
+                          const f = e.target.files?.[0];
+                          if (f) setThumbnailFile(f);
+                        }}
+                        className="text-xs text-gray-400 file:bg-[#0f0f23] file:text-white file:border file:border-gray-700 file:rounded file:px-2 file:py-1 file:mr-2 file:cursor-pointer file:hover:bg-[#1a2744]"
+                      />
+                    </div>
                   </div>
                   <div className="flex gap-2">
                     <button

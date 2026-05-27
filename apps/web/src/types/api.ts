@@ -35,6 +35,7 @@ export interface Video {
   created_at: string;
   creator?: { display_name: string | null; handle: string | null };
   access_check_result?: AccessResult;
+  comments_enabled?: boolean;
 }
 
 export interface PaywallPayload {

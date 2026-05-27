@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import { LoggerModule } from 'nestjs-pino';
+import { ScheduleModule } from '@nestjs/schedule';
 import { DomainErrorFilter } from './common/filters/domain-error.filter';
 import { RedisModule } from './common/redis.module';
 import { DbModule } from './db/db.module';
@@ -17,9 +18,11 @@ import { SubscriptionsModule } from './modules/subscriptions/subscriptions.modul
 import { WalletModule } from './modules/wallet/wallet.module';
 import { StudioModule } from './modules/studio/studio.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { SchedulerService } from './workers/scheduler.service';
 
 @Module({
   imports: [
+    ScheduleModule.forRoot(),
     LoggerModule.forRoot({
       pinoHttp: {
         transport:
@@ -51,6 +54,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
       provide: APP_FILTER,
       useClass: DomainErrorFilter,
     },
+    SchedulerService,
   ],
 })
 export class AppModule {}
