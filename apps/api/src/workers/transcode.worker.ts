@@ -141,7 +141,7 @@ export function createTranscodeWorker(redisUrl: string, db: Db, storage: Storage
           'thumbnail.extract',
           { videoId },
           {
-            jobId: `thumb:${videoId}`,
+            jobId: `thumb-${videoId}`,
           },
         );
 

@@ -1,9 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import {
   S3Client,
-  CreateMultipartUploadCommand,
-  CompleteMultipartUploadCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -38,36 +37,18 @@ export class StorageService {
     return this.thumbBucket;
   }
 
-  async createMultipartUpload(bucket: string, key: string): Promise<string> {
-    const cmd = new CreateMultipartUploadCommand({ Bucket: bucket, Key: key });
-    const result = await this.s3.send(cmd);
-    return result.UploadId!;
-  }
-
-  async getPresignedPutUrl(
-    bucket: string,
-    key: string,
-    _uploadId: string,
-    _partNumber: number,
-    ttlSeconds = 3600,
-  ): Promise<string> {
+  async getPresignedPutUrl(bucket: string, key: string, ttlSeconds = 3600): Promise<string> {
     const cmd = new PutObjectCommand({ Bucket: bucket, Key: key });
     return getSignedUrl(this.s3, cmd, { expiresIn: ttlSeconds });
   }
 
-  async completeMultipartUpload(
-    bucket: string,
-    key: string,
-    uploadId: string,
-    parts: { ETag: string; PartNumber: number }[],
-  ): Promise<void> {
-    const cmd = new CompleteMultipartUploadCommand({
-      Bucket: bucket,
-      Key: key,
-      UploadId: uploadId,
-      MultipartUpload: { Parts: parts },
-    });
-    await this.s3.send(cmd);
+  async objectExists(bucket: string, key: string): Promise<boolean> {
+    try {
+      await this.s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async getPresignedGetUrl(bucket: string, key: string, ttlSeconds = 3600): Promise<string> {

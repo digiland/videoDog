@@ -11,7 +11,7 @@ export class EarningsService {
   async getEarnings(creatorId: string, month: string) {
     // month format: YYYY-MM
     const [year, mon] = month.split('-').map(Number);
-    if (!year || !mon) return { month, earnings: null };
+    if (!year || !mon) return this.zeroEarnings(month);
 
     const from = new Date(year, mon - 1, 1);
     const to = new Date(year, mon, 1);
@@ -30,7 +30,7 @@ export class EarningsService {
       )
       .limit(1);
 
-    if (!acc) return { month, earnings: { ppv: 0, premium_payout: 0, tips: 0, total: 0 } };
+    if (!acc) return this.zeroEarnings(month);
 
     // Credits by ref_type for this month
     const entries = await this.db
@@ -60,12 +60,21 @@ export class EarningsService {
 
     return {
       month,
-      earnings: {
-        ppv: new Money(ppv, 'USD').toJSON(),
-        premium_payout: new Money(premiumPayout, 'USD').toJSON(),
-        tips: new Money(tips, 'USD').toJSON(),
-        total: new Money(total, 'USD').toJSON(),
-      },
+      ppv_amount: new Money(ppv, 'USD').toJSON(),
+      premium_pool_estimate: new Money(premiumPayout, 'USD').toJSON(),
+      tips_amount: new Money(tips, 'USD').toJSON(),
+      total: new Money(total, 'USD').toJSON(),
+    };
+  }
+
+  private zeroEarnings(month: string) {
+    const zero = new Money(0n, 'USD').toJSON();
+    return {
+      month,
+      ppv_amount: zero,
+      premium_pool_estimate: zero,
+      tips_amount: zero,
+      total: zero,
     };
   }
 }

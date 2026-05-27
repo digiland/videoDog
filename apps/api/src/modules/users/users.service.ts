@@ -17,6 +17,28 @@ const UpdateUserSchema = z.object({
 
 export type UpdateUserDto = z.infer<typeof UpdateUserSchema>;
 
+type UserRow = typeof users.$inferSelect;
+
+function serializeUser(u: UserRow) {
+  return {
+    id: u.id,
+    phone_e164: u.phoneE164,
+    handle: u.handle,
+    display_name: u.displayName,
+    role: u.role,
+    kyc_state: u.kycState,
+    preferred_display_currency: u.preferredDisplayCurrency,
+    preferred_payout_currency: u.preferredPayoutCurrency,
+    canonical_pricing_currency: u.canonicalPricingCurrency,
+    payout_msisdn: u.payoutMsisdn,
+    creator_application_state: u.creatorApplicationState,
+    creator_application_pitch: u.creatorApplicationPitch,
+    creator_application_at: u.creatorApplicationAt,
+    created_at: u.createdAt,
+    updated_at: u.updatedAt,
+  };
+}
+
 @Injectable()
 export class UsersService {
   constructor(@Inject(DB) private readonly db: Db) {}
@@ -24,7 +46,7 @@ export class UsersService {
   async findById(id: string) {
     const [user] = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
     if (!user) throw new ResourceNotFoundError('User');
-    return user;
+    return serializeUser(user);
   }
 
   async findByPhone(phone: string) {
@@ -64,7 +86,7 @@ export class UsersService {
       .where(eq(users.id, id))
       .returning();
     if (!updated) throw new ResourceNotFoundError('User');
-    return updated;
+    return serializeUser(updated);
   }
 
   async applyForCreator(id: string, pitch: string, canonicalCurrency: string) {

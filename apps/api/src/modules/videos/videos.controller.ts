@@ -19,11 +19,6 @@ import { VideosService } from './videos.service';
 import { z } from 'zod';
 import { ValidationError } from '../auth/errors';
 
-const CompleteUploadSchema = z.object({
-  upload_id: z.string(),
-  parts: z.array(z.object({ ETag: z.string(), PartNumber: z.number().int() })).default([]),
-});
-
 @Controller('videos')
 @UseGuards(JwtGuard)
 export class VideosController {
@@ -39,14 +34,8 @@ export class VideosController {
   @Post(':id/complete-upload')
   @UseGuards(RequireAuthGuard, RolesGuard)
   @Roles('creator', 'admin')
-  async completeUpload(
-    @Req() req: AuthenticatedRequest,
-    @Param('id') id: string,
-    @Body() body: unknown,
-  ) {
-    const parsed = CompleteUploadSchema.safeParse(body);
-    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
-    return this.videos.completeUpload(id, req.user.id, parsed.data.upload_id, parsed.data.parts);
+  async completeUpload(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.videos.completeUpload(id, req.user.id);
   }
 
   @Patch(':id')
@@ -65,18 +54,24 @@ export class VideosController {
 
   @Get()
   async list(
+    @Req() req: AuthenticatedRequest,
     @Query('mode') mode?: string,
     @Query('creator') creatorId?: string,
     @Query('q') q?: string,
     @Query('limit') limit?: string,
     @Query('cursor') cursor?: string,
   ) {
+    if (creatorId === 'me') {
+      if (!req.user?.id) throw new ValidationError('Authentication required for creator=me');
+      creatorId = req.user.id;
+    }
     return this.videos.list({
       mode,
       creatorId,
       q,
       limit: limit ? parseInt(limit, 10) : undefined,
       cursor,
+      includeUnpublished: creatorId === req.user?.id,
     });
   }
 

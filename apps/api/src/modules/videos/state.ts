@@ -9,7 +9,7 @@ export type VideoState =
   | 'failed';
 
 const transitions: Record<VideoState, VideoState[]> = {
-  uploading: ['processing', 'failed'],
+  uploading: ['processing', 'ready', 'failed'],
   processing: ['ready', 'failed'],
   ready: ['published'],
   published: ['unpublished'],

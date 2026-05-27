@@ -95,9 +95,9 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
 
       if (typeof window === 'undefined') return;
 
-      // Plain MP4 / WebM — let the browser handle it directly.
-      const isHls = /\.m3u8(\?|$)/i.test(src);
-      if (!isHls) {
+      // Progressive formats can be handled natively; everything else is treated as HLS.
+      const isProgressive = /\.(mp4|webm|ogg)(\?|$)/i.test(src);
+      if (isProgressive) {
         video.src = src;
         return;
       }
@@ -129,8 +129,8 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
         hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
           setCurrentLevel(data.level);
         });
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Safari native HLS
+      } else {
+        // Native HLS on Safari; direct fallback on other browsers.
         video.src = src;
       }
     }

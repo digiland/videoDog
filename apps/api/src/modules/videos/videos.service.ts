@@ -72,50 +72,54 @@ export class VideosService {
     if (!video) throw new Error('Failed to create video');
 
     const key = originalKey(video.id);
-    const uploadId = await this.storage.createMultipartUpload(this.storage.videoBucketName, key);
-    const presignedUrl = await this.storage.getPresignedPutUrl(
-      this.storage.videoBucketName,
-      key,
-      uploadId,
-      1,
-    );
+    const presignedUrl = await this.storage.getPresignedPutUrl(this.storage.videoBucketName, key);
 
     return {
       video_id: video.id,
-      upload_id: uploadId,
       presigned_url: presignedUrl,
       key,
     };
   }
 
-  async completeUpload(
-    videoId: string,
-    ownerId: string,
-    uploadId: string,
-    parts: { ETag: string; PartNumber: number }[],
-  ) {
+  async completeUpload(videoId: string, ownerId: string) {
     const video = await this.getOwned(videoId, ownerId);
-    assertTransition(video.state, 'processing');
 
     const key = originalKey(videoId);
-    await this.storage.completeMultipartUpload(this.storage.videoBucketName, key, uploadId, parts);
+    const exists = await this.storage.objectExists(this.storage.videoBucketName, key);
+    if (!exists) {
+      throw new ValidationError('Upload not found in storage; PUT to presigned URL first');
+    }
 
+    const transcodeEnabled = process.env.TRANSCODE_ENABLED !== 'false';
+
+    if (transcodeEnabled) {
+      assertTransition(video.state, 'processing');
+      await this.db
+        .update(videos)
+        .set({ state: 'processing', updatedAt: new Date() })
+        .where(eq(videos.id, videoId));
+
+      await this.transcodeQueue.add(
+        'transcode',
+        { videoId },
+        {
+          jobId: `transcode-${videoId}`,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+        },
+      );
+
+      return { status: 'processing' };
+    }
+
+    // Transcode disabled — serve original mp4 directly (MVP mode).
+    assertTransition(video.state, 'ready');
     await this.db
       .update(videos)
-      .set({ state: 'processing', updatedAt: new Date() })
+      .set({ state: 'ready', hlsPlaylistKey: key, updatedAt: new Date() })
       .where(eq(videos.id, videoId));
 
-    await this.transcodeQueue.add(
-      'transcode',
-      { videoId },
-      {
-        jobId: `transcode:${videoId}`,
-        attempts: 3,
-        backoff: { type: 'exponential', delay: 5000 },
-      },
-    );
-
-    return { status: 'processing' };
+    return { status: 'ready' };
   }
 
   async publish(videoId: string, ownerId: string) {
@@ -226,9 +230,13 @@ export class VideosService {
     q?: string;
     cursor?: string;
     limit?: number;
+    includeUnpublished?: boolean;
   }) {
     const limit = Math.min(filters.limit ?? 20, 100);
-    const conditions = [eq(videos.state, 'published')];
+    const conditions = [];
+    if (!filters.includeUnpublished) {
+      conditions.push(eq(videos.state, 'published'));
+    }
 
     if (filters.mode) {
       conditions.push(
@@ -346,13 +354,7 @@ export class VideosService {
     }
 
     const key = `captions/${videoId}/${dto.language}-${Date.now()}.vtt`;
-    const uploadUrl = await this.storage.getPresignedPutUrl(
-      this.storage.videoBucketName,
-      key,
-      'caption',
-      1,
-      900,
-    );
+    const uploadUrl = await this.storage.getPresignedPutUrl(this.storage.videoBucketName, key, 900);
 
     const [row] = await this.db
       .insert(captions)

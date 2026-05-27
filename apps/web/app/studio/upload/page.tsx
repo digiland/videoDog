@@ -119,7 +119,7 @@ export default function UploadPage() {
 
       // Step 3: Complete upload
       setUploadState('complete-upload');
-      await api.post(`/videos/${vid}/complete-upload`, { parts: [] });
+      await api.post(`/videos/${vid}/complete-upload`, {});
 
       // Step 4: Poll for state
       setUploadState('processing');
