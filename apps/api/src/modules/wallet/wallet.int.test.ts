@@ -131,4 +131,15 @@ describe.skipIf(!hasDb)('wallet payouts (integration)', () => {
     expect(row!.state).toBe('failed');
     expect(await ledger.balance(balanceAcc)).toBe(1000n);
   });
+
+  it("lists the creator's own payouts with their states", async () => {
+    const { creator } = await fundedCreator(1000n);
+    await wallet.requestPayout(creator.id, { amount_minor: 500, currency: 'USD' });
+    const { items } = await wallet.listPayouts(creator.id);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      state: 'requested',
+      amount: { amount_minor: '500', currency: 'USD' },
+    });
+  });
 });

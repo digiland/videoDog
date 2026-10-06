@@ -93,6 +93,20 @@ export class VideosController {
     return this.videos.completeUpload(id, req.user.id);
   }
 
+  @Post(':id/unpublish')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async unpublish(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.unpublish(id, req.user.id);
+  }
+
+  @Delete(':id')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async remove(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.deleteDraft(id, req.user.id);
+  }
+
   @Patch(':id')
   @UseGuards(RequireAuthGuard, RolesGuard)
   @Roles('creator', 'admin')

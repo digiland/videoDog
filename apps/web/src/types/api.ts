@@ -79,7 +79,7 @@ export interface Subscription {
 }
 
 export interface WalletBalance {
-  balances: Array<{ currency: string; amount_minor: string }>;
+  balances: Array<{ currency: string; balance_minor: string }>;
 }
 
 export interface Earnings {

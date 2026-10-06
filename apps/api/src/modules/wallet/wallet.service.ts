@@ -86,6 +86,30 @@ export class WalletService {
     return { entries };
   }
 
+  /** The creator's payouts, newest first, with their real states. */
+  async listPayouts(userId: string, limit = 50) {
+    const rows = await this.db
+      .select()
+      .from(payouts)
+      .where(eq(payouts.creatorId, userId))
+      .orderBy(desc(payouts.createdAt))
+      .limit(limit);
+    return {
+      items: rows.map((p) => ({
+        id: p.id,
+        state: p.state,
+        amount: new Money(
+          BigInt(p.requestedAmountMinor),
+          p.payoutCurrency as CurrencyCode,
+        ).toJSON(),
+        msisdn: p.msisdn,
+        failure_reason: p.state === 'failed' ? p.failureReason : null,
+        created_at: p.createdAt,
+        processed_at: p.processedAt,
+      })),
+    };
+  }
+
   /**
    * Request a payout to the creator's verified payout number.
    *

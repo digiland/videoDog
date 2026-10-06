@@ -138,4 +138,18 @@ describe.skipIf(!hasDb)('video visibility and playback grants (integration)', ()
     expect(second.items[0]!.id).not.toBe(first.items[0]!.id);
     expect(second.items[0]!.id).not.toBe(first.items[1]!.id);
   });
+
+  it('deletes only never-published, unsold drafts; unpublish hides from the catalogue', async () => {
+    const owner = await makeUser(db, { role: 'creator' });
+    const draft = await makeVideo(db, owner.id, { state: 'uploading', publishedAt: null });
+    await videos.deleteDraft(draft.id, owner.id);
+    await expect(videos.findById(draft.id, { id: owner.id, role: 'creator' })).rejects.toThrow(
+      /not found/i,
+    );
+
+    const live = await makeVideo(db, owner.id);
+    await expect(videos.deleteDraft(live.id, owner.id)).rejects.toThrow(/never published/);
+    await videos.unpublish(live.id, owner.id);
+    await expect(videos.findById(live.id, null)).rejects.toThrow(/not found/i);
+  });
 });

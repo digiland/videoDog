@@ -234,6 +234,37 @@ export class VideosService {
     return updated!;
   }
 
+  /** Take a published video off the catalogue. Buyers keep access (§6: purchases persist). */
+  async unpublish(videoId: string, ownerId: string) {
+    const video = await this.getOwned(videoId, ownerId);
+    assertTransition(video.state, 'unpublished');
+    const [updated] = await this.db
+      .update(videos)
+      .set({ state: 'unpublished', updatedAt: new Date() })
+      .where(eq(videos.id, videoId))
+      .returning();
+    return updated!;
+  }
+
+  /**
+   * Delete a video that never went live (an abandoned or failed upload, or one that's ready
+   * but unpublished and unsold). Anything published or bought stays, for buyers and the ledger.
+   */
+  async deleteDraft(videoId: string, ownerId: string) {
+    const video = await this.getOwned(videoId, ownerId);
+    if (video.publishedAt || !['uploading', 'failed', 'ready'].includes(video.state)) {
+      throw new ValidationError('Only videos that were never published can be deleted');
+    }
+    const [sold] = await this.db
+      .select({ id: purchases.id })
+      .from(purchases)
+      .where(eq(purchases.videoId, videoId))
+      .limit(1);
+    if (sold) throw new ValidationError('This video has purchases and cannot be deleted');
+    await this.db.delete(videos).where(eq(videos.id, videoId));
+    return { ok: true };
+  }
+
   async update(videoId: string, ownerId: string, body: unknown) {
     const parsed = UpdateVideoSchema.safeParse(body);
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
