@@ -4,13 +4,17 @@ import { useRouter } from 'next/navigation';
 import { api } from '../../src/lib/api';
 import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
 import { formatMoney } from '../../src/lib/format';
-import { currentPath, signInHref } from '../../src/lib/return-to';
 import {
+  type PaymentMethod,
   isE164,
+  isSafeRedirectUrl,
+  methodsFor,
   newIdempotencyKey,
   normaliseMsisdn,
-  providerForCurrency,
+  providerFor,
+  stashPendingCardPayment,
 } from '../../src/lib/payments';
+import { currentPath, signInHref } from '../../src/lib/return-to';
 import type {
   CreatePaymentResponse,
   CreatePurchaseResponse,
@@ -18,18 +22,17 @@ import type {
   MoneyDTO,
   PaymentCurrencyCode,
   PaymentState,
-  PaymentStatus,
   User,
 } from '../../src/types/api';
+import DevSimulatePayment from './DevSimulatePayment';
+import { type PollOutcome, usePaymentPolling } from './usePaymentPolling';
 
-const POLL_INTERVAL_MS = 3_000;
-const POLL_TIMEOUT_MS = 3 * 60_000;
+const CURRENCIES: readonly PaymentCurrencyCode[] = ['USD', 'ZWG', 'ZAR'];
 
-const CURRENCY_OPTIONS: ReadonlyArray<{ code: PaymentCurrencyCode; label: string }> = [
-  { code: 'USD', label: 'USD' },
-  { code: 'ZWG', label: 'ZWG' },
-  { code: 'ZAR', label: 'ZAR' },
-];
+const METHOD_LABEL: Record<PaymentMethod, string> = {
+  ecocash: 'EcoCash',
+  card: 'Card (Paystack)',
+};
 
 export type CheckoutTarget =
   | { kind: 'purchase'; videoId: string }
@@ -40,7 +43,12 @@ interface Props {
   /** Listed price, shown before the order is created. The server decides the charge. */
   listPrice?: MoneyDTO;
   initialCurrency?: string;
-  /** Called once the payment is confirmed `completed`. */
+  /**
+   * Same-origin path to land on after a card payment completes (the browser leaves for
+   * Paystack and comes back via /checkout/return, so `onCompleted` can't run).
+   */
+  returnPath: string;
+  /** Called when an in-page (EcoCash) payment is confirmed `completed`. */
   onCompleted: () => void;
 }
 
@@ -55,6 +63,7 @@ type Phase =
   | { name: 'init' }
   | { name: 'form' }
   | { name: 'submitting' }
+  | { name: 'redirecting' }
   | { name: 'awaiting'; paymentId: string; amount: MoneyDTO }
   | { name: 'timeout'; paymentId: string; amount: MoneyDTO }
   | { name: 'failed'; message: string }
@@ -64,51 +73,72 @@ function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback;
 }
 
-function isTerminalFailure(state: PaymentState): boolean {
-  return state === 'failed' || state === 'reversed';
-}
-
 function asPaymentCurrency(c: string | undefined): PaymentCurrencyCode {
-  return c === 'ZWG' ? 'ZWG' : 'USD';
+  return c === 'ZWG' || c === 'ZAR' ? c : 'USD';
 }
 
-export default function EcoCashCheckout({
+export default function Checkout({
   target,
   listPrice,
   initialCurrency,
+  returnPath,
   onCompleted,
 }: Props) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>({ name: 'init' });
   const [currency, setCurrency] = useState<PaymentCurrencyCode>(asPaymentCurrency(initialCurrency));
+  const [preferredMethod, setPreferredMethod] = useState<PaymentMethod>('ecocash');
   const [msisdn, setMsisdn] = useState('');
+  const [accountPhone, setAccountPhone] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+
+  const methods = methodsFor(currency);
+  const method: PaymentMethod = methods.includes(preferredMethod)
+    ? preferredMethod
+    : (methods[0] ?? 'ecocash');
 
   const orderRef = useRef<Order | null>(null);
   // One idempotency key per payment attempt; reused if the same attempt is retried
   // (e.g. POST /payments timed out), replaced once that attempt has definitively failed.
   const attemptRef = useRef<{ key: string; fingerprint: string } | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const onCompletedRef = useRef(onCompleted);
   onCompletedRef.current = onCompleted;
-
-  const stopPolling = useCallback(() => {
-    if (pollTimerRef.current) {
-      clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
-  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      stopPolling();
     };
-  }, [stopPolling]);
+  }, []);
 
-  // Sign-in gate + EcoCash number prefill from the profile phone.
+  const handleOutcome = useCallback((outcome: PollOutcome, paymentId: string) => {
+    if (!mountedRef.current) return;
+    if (outcome === 'completed') {
+      attemptRef.current = null;
+      setPhase({ name: 'completed' });
+      onCompletedRef.current();
+      return;
+    }
+    if (outcome === 'timeout') {
+      setPhase((p) =>
+        p.name === 'awaiting' ? { name: 'timeout', paymentId, amount: p.amount } : p,
+      );
+      return;
+    }
+    attemptRef.current = null; // next try is a new attempt with a new key
+    setPhase({
+      name: 'failed',
+      message:
+        outcome === 'reversed'
+          ? 'The payment was reversed. You have not been charged.'
+          : 'The payment was declined or cancelled. You have not been charged.',
+    });
+  }, []);
+
+  const poller = usePaymentPolling(handleOutcome);
+
+  // Sign-in gate + number prefill from the profile phone.
   useEffect(() => {
     if (!isAuthenticated() && !getRefreshToken()) {
       // Come back to this checkout (purchase page or pricing) after signing in.
@@ -121,6 +151,7 @@ export default function EcoCashCheckout({
         const me =
           await api.get<Pick<User, 'phone_e164' | 'preferred_display_currency'>>('/users/me');
         if (cancelled) return;
+        setAccountPhone(me.phone_e164);
         setMsisdn((cur) => cur || me.phone_e164);
         if (!initialCurrency) setCurrency(asPaymentCurrency(me.preferred_display_currency));
       } catch {
@@ -133,53 +164,9 @@ export default function EcoCashCheckout({
     };
   }, [router, initialCurrency]);
 
-  const handleOutcome = useCallback(
-    (state: PaymentState, paymentId: string, amount: MoneyDTO, deadline: number): void => {
-      if (!mountedRef.current) return;
-      if (state === 'completed') {
-        stopPolling();
-        attemptRef.current = null;
-        setPhase({ name: 'completed' });
-        onCompletedRef.current();
-        return;
-      }
-      if (isTerminalFailure(state)) {
-        stopPolling();
-        attemptRef.current = null; // next try is a new attempt with a new key
-        setPhase({
-          name: 'failed',
-          message:
-            state === 'reversed'
-              ? 'The payment was reversed. You have not been charged.'
-              : 'The payment was declined or cancelled. You have not been charged.',
-        });
-        return;
-      }
-      if (Date.now() >= deadline) {
-        stopPolling();
-        setPhase({ name: 'timeout', paymentId, amount });
-        return;
-      }
-      // Still initiated/pending — poll again.
-      pollTimerRef.current = setTimeout(() => {
-        void (async () => {
-          try {
-            const p = await api.get<PaymentStatus>(`/payments/${encodeURIComponent(paymentId)}`);
-            handleOutcome(p.state, paymentId, amount, deadline);
-          } catch {
-            // Transient error: keep polling until the deadline.
-            handleOutcome('pending', paymentId, amount, deadline);
-          }
-        })();
-      }, POLL_INTERVAL_MS);
-    },
-    [stopPolling],
-  );
-
-  function startPolling(paymentId: string, amount: MoneyDTO, initial: PaymentState) {
-    stopPolling();
+  function startWaiting(paymentId: string, amount: MoneyDTO, initial: PaymentState | null) {
     setPhase({ name: 'awaiting', paymentId, amount });
-    handleOutcome(initial, paymentId, amount, Date.now() + POLL_TIMEOUT_MS);
+    poller.start(paymentId, initial); // a terminal `initial` settles immediately
   }
 
   async function ensureOrder(): Promise<Order> {
@@ -206,17 +193,24 @@ export default function EcoCashCheckout({
   async function handlePay(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
-    const provider = providerForCurrency(currency);
+    const provider = providerFor(currency, method);
     if (!provider) {
-      setFormError(`${currency} payments are coming soon. Please choose USD or ZWG.`);
+      setFormError(`${METHOD_LABEL[method]} isn't available for ${currency}.`);
       return;
     }
-    const number = normaliseMsisdn(msisdn.trim());
+    // The API needs an MSISDN for every payment: the EcoCash wallet to prompt, or (for
+    // cards) the account's own phone for the provider's records.
+    const typed = normaliseMsisdn(msisdn.trim());
+    const number = method === 'card' && accountPhone ? accountPhone : typed;
     if (!isE164(number)) {
-      setFormError('Enter your EcoCash number in international format, e.g. +263771234567.');
+      setFormError(
+        method === 'card'
+          ? 'Enter your phone number in international format, e.g. +263771234567.'
+          : 'Enter your EcoCash number in international format, e.g. +263771234567.',
+      );
       return;
     }
-    setMsisdn(number);
+    if (method === 'ecocash') setMsisdn(number);
     setPhase({ name: 'submitting' });
     try {
       const order = await ensureOrder();
@@ -233,7 +227,33 @@ export default function EcoCashCheckout({
         idempotency_key: attemptRef.current.key,
       });
       if (!mountedRef.current) return;
-      startPolling(payment.payment_id, order.amount, payment.status);
+
+      if (payment.status !== 'initiated' && payment.status !== 'pending') {
+        // Already settled (e.g. an idempotent replay of an attempt that finished).
+        startWaiting(payment.payment_id, order.amount, payment.status);
+        return;
+      }
+
+      if (method === 'card') {
+        if (!isSafeRedirectUrl(payment.redirect_url)) {
+          // e.g. an idempotent replay of an earlier attempt, which carries no redirect URL.
+          attemptRef.current = null;
+          setFormError('Could not open the card checkout. Please try again.');
+          setPhase({ name: 'form' });
+          return;
+        }
+        // Best-effort: if storage is blocked, /checkout/return explains what happened.
+        stashPendingCardPayment({
+          payment_id: payment.payment_id,
+          return_path: returnPath,
+          retry_path: currentPath(),
+        });
+        setPhase({ name: 'redirecting' });
+        window.location.assign(payment.redirect_url);
+        return;
+      }
+
+      startWaiting(payment.payment_id, order.amount, null);
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       // Keep attemptRef: retrying this same attempt must reuse its idempotency key.
@@ -244,10 +264,13 @@ export default function EcoCashCheckout({
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  if (phase.name === 'init') {
+  if (phase.name === 'init' || phase.name === 'redirecting') {
     return (
-      <div className="flex justify-center py-10">
+      <div className="flex flex-col items-center gap-3 py-10" aria-live="polite">
         <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+        {phase.name === 'redirecting' && (
+          <p className="text-sm text-ink-mute">Taking you to secure card checkout…</p>
+        )}
       </div>
     );
   }
@@ -286,7 +309,7 @@ export default function EcoCashCheckout({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => startPolling(phase.paymentId, phase.amount, 'pending')}
+                onClick={() => startWaiting(phase.paymentId, phase.amount, null)}
                 className="bg-accent hover:bg-accent-hot text-bg font-semibold px-4 py-2 rounded-md text-sm transition"
               >
                 Check again
@@ -304,6 +327,14 @@ export default function EcoCashCheckout({
             </div>
           </>
         )}
+        <DevSimulatePayment
+          paymentId={phase.paymentId}
+          onSimulated={() =>
+            phase.name === 'awaiting'
+              ? poller.pollNow()
+              : startWaiting(phase.paymentId, phase.amount, null)
+          }
+        />
       </div>
     );
   }
@@ -326,6 +357,7 @@ export default function EcoCashCheckout({
   }
 
   const busy = phase.name === 'submitting';
+  const showNumberInput = method === 'ecocash' || !accountPhone;
   return (
     <form onSubmit={(e) => void handlePay(e)} className="space-y-5">
       {listPrice && (
@@ -336,8 +368,8 @@ export default function EcoCashCheckout({
           </span>
           {currency !== listPrice.currency && (
             <span className="block text-xs text-ink-dim mt-0.5">
-              Charged in {currency} at today&rsquo;s rate; the exact amount is shown on the EcoCash
-              prompt.
+              Charged in {currency} at today&rsquo;s rate; the exact amount is confirmed before you
+              pay.
             </span>
           )}
         </p>
@@ -346,53 +378,75 @@ export default function EcoCashCheckout({
       <fieldset>
         <legend className="block text-sm font-medium mb-1.5">Pay in</legend>
         <div className="flex flex-wrap gap-2">
-          {CURRENCY_OPTIONS.map(({ code, label }) => {
-            const available = providerForCurrency(code) !== null;
-            return (
-              <button
-                key={code}
-                type="button"
-                disabled={!available || busy}
-                aria-pressed={currency === code}
-                onClick={() => setCurrency(code)}
-                className={`text-sm font-medium px-4 py-2 rounded-md transition disabled:cursor-not-allowed ${
-                  currency === code
-                    ? 'bg-accent text-bg'
-                    : available
-                      ? 'bg-surface text-ink-mute hover:text-ink'
-                      : 'bg-surface text-ink-dim opacity-60'
-                }`}
-              >
-                {label}
-                {!available && <span className="ml-1 text-[10px] uppercase">coming soon</span>}
-              </button>
-            );
-          })}
+          {CURRENCIES.map((code) => (
+            <button
+              key={code}
+              type="button"
+              disabled={busy}
+              aria-pressed={currency === code}
+              onClick={() => setCurrency(code)}
+              className={`text-sm font-medium px-4 py-2 rounded-md transition ${
+                currency === code ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
+              }`}
+            >
+              {code}
+            </button>
+          ))}
         </div>
       </fieldset>
 
-      <div>
-        <label htmlFor="ecocash-msisdn" className="block text-sm font-medium mb-1.5">
-          EcoCash number
-        </label>
-        <input
-          id="ecocash-msisdn"
-          type="tel"
-          inputMode="tel"
-          autoComplete="tel"
-          value={msisdn}
-          onChange={(e) => {
-            setMsisdn(e.target.value);
-            setFormError(null);
-          }}
-          placeholder="+263771234567"
-          disabled={busy}
-          className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2.5 placeholder:text-ink-dim focus:outline-none transition"
-        />
-        <p className="mt-1 text-xs text-ink-dim">
-          You&rsquo;ll get a prompt on this phone to approve with your EcoCash PIN.
-        </p>
-      </div>
+      <fieldset>
+        <legend className="block text-sm font-medium mb-1.5">Pay with</legend>
+        <div className="flex flex-wrap gap-2">
+          {methods.map((m) => (
+            <button
+              key={m}
+              type="button"
+              disabled={busy}
+              aria-pressed={method === m}
+              onClick={() => setPreferredMethod(m)}
+              className={`text-sm font-medium px-4 py-2 rounded-md transition ${
+                method === m ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
+              }`}
+            >
+              {METHOD_LABEL[m]}
+            </button>
+          ))}
+        </div>
+        {method === 'card' && (
+          <p className="mt-1 text-xs text-ink-dim">
+            Visa / Mastercard via Paystack. You&rsquo;ll be sent to Paystack&rsquo;s secure page and
+            brought back here.
+          </p>
+        )}
+      </fieldset>
+
+      {showNumberInput && (
+        <div>
+          <label htmlFor="checkout-msisdn" className="block text-sm font-medium mb-1.5">
+            {method === 'ecocash' ? 'EcoCash number' : 'Phone number'}
+          </label>
+          <input
+            id="checkout-msisdn"
+            type="tel"
+            inputMode="tel"
+            autoComplete="tel"
+            value={msisdn}
+            onChange={(e) => {
+              setMsisdn(e.target.value);
+              setFormError(null);
+            }}
+            placeholder="+263771234567"
+            disabled={busy}
+            className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2.5 placeholder:text-ink-dim focus:outline-none transition"
+          />
+          {method === 'ecocash' && (
+            <p className="mt-1 text-xs text-ink-dim">
+              You&rsquo;ll get a prompt on this phone to approve with your EcoCash PIN.
+            </p>
+          )}
+        </div>
+      )}
 
       {formError && (
         <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
@@ -405,7 +459,11 @@ export default function EcoCashCheckout({
         disabled={busy}
         className="w-full bg-accent hover:bg-accent-hot text-bg font-semibold py-3 rounded-md text-sm transition disabled:opacity-50"
       >
-        {busy ? 'Starting payment…' : 'Pay with EcoCash'}
+        {busy
+          ? 'Starting payment…'
+          : method === 'card'
+            ? 'Continue to card payment'
+            : 'Pay with EcoCash'}
       </button>
     </form>
   );

@@ -1,5 +1,6 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
 import { api } from '../../../src/lib/api';
 import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
 import type { Earnings, WalletBalance } from '../../../src/types/api';
@@ -8,10 +9,6 @@ import { formatMoney } from '../../../src/lib/format';
 function currentMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function generateIdempotencyKey(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export default function EarningsPage() {
@@ -24,7 +21,8 @@ export default function EarningsPage() {
   // Payout modal state
   const [payoutAmount, setPayoutAmount] = useState('');
   const [payoutCurrency, setPayoutCurrency] = useState('USD');
-  const [payoutMsisdn, setPayoutMsisdn] = useState('');
+  // Payouts go to the profile's payout number (set/changed with an OTP on the Payouts page).
+  const [payoutMsisdn, setPayoutMsisdn] = useState<string | null>(null);
   const [payoutLoading, setPayoutLoading] = useState(false);
   const [payoutError, setPayoutError] = useState<string | null>(null);
   const [payoutSuccess, setPayoutSuccess] = useState(false);
@@ -32,12 +30,14 @@ export default function EarningsPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [earningsData, balanceData] = await Promise.allSettled([
+      const [earningsData, balanceData, meData] = await Promise.allSettled([
         api.get<Earnings>(`/studio/earnings?month=${month}`),
         api.get<WalletBalance>('/wallet/balance'),
+        api.get<{ payout_msisdn: string | null }>('/users/me'),
       ]);
       if (earningsData.status === 'fulfilled') setEarnings(earningsData.value);
       if (balanceData.status === 'fulfilled') setBalance(balanceData.value);
+      if (meData.status === 'fulfilled') setPayoutMsisdn(meData.value.payout_msisdn);
     } finally {
       setLoading(false);
     }
@@ -50,8 +50,12 @@ export default function EarningsPage() {
   async function handlePayout(e: React.FormEvent) {
     e.preventDefault();
     setPayoutError(null);
-    if (!payoutAmount || !payoutMsisdn) {
-      setPayoutError('Please fill in all fields.');
+    if (!payoutMsisdn) {
+      setPayoutError('Set a payout number on the Payouts page first.');
+      return;
+    }
+    if (!payoutAmount) {
+      setPayoutError('Enter an amount.');
       return;
     }
     const amountMinor = parseMajorToMinor(payoutAmount);
@@ -65,8 +69,6 @@ export default function EarningsPage() {
         // JSON number only at the API boundary; payout amounts are far below 2^53.
         amount_minor: minorToJsonNumber(amountMinor),
         currency: payoutCurrency,
-        msisdn: payoutMsisdn,
-        idempotency_key: generateIdempotencyKey(),
       });
       setPayoutSuccess(true);
       void loadData();
@@ -247,29 +249,33 @@ export default function EarningsPage() {
                     >
                       <option value="USD">USD</option>
                       <option value="ZWG">ZWG</option>
-                      <option value="ZAR">ZAR</option>
+                      <option value="ZAR" disabled>
+                        ZAR (coming soon)
+                      </option>
                     </select>
                   </div>
                 </div>
 
-                <div>
-                  <label
-                    htmlFor="earnings-payout-msisdn"
-                    className="block text-sm font-medium text-gray-300 mb-1.5"
-                  >
-                    EcoCash number (E.164)
-                  </label>
-                  <input
-                    id="earnings-payout-msisdn"
-                    type="tel"
-                    value={payoutMsisdn}
-                    onChange={(e) => setPayoutMsisdn(e.target.value)}
-                    placeholder="+263771234567"
-                    className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-full focus:outline-none focus:border-[#e94560] transition"
-                  />
+                <div className="text-sm text-gray-300">
+                  {payoutMsisdn ? (
+                    <>
+                      Paid to EcoCash <span className="font-mono">{payoutMsisdn}</span>.{' '}
+                      <Link href="/studio/payouts" className="text-[#e94560] hover:underline">
+                        Change
+                      </Link>
+                    </>
+                  ) : (
+                    <>
+                      No payout number yet.{' '}
+                      <Link href="/studio/payouts" className="text-[#e94560] hover:underline">
+                        Set your payout number
+                      </Link>{' '}
+                      first.
+                    </>
+                  )}
                 </div>
 
-                <p className="text-xs text-gray-600">Minimums: USD $5.00 · ZWG 150 · ZAR 100</p>
+                <p className="text-xs text-gray-600">Minimums: USD $5.00 · ZWG 150</p>
 
                 {payoutError && (
                   <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-3 py-2 text-sm text-red-300">

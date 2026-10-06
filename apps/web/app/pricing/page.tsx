@@ -7,7 +7,7 @@ import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
 import { formatMoney } from '../../src/lib/format';
 import { currentPath, safeReturnTo, signInHref } from '../../src/lib/return-to';
 import type { MoneyDTO, SubscriptionPlan } from '../../src/types/api';
-import EcoCashCheckout from '../components/EcoCashCheckout';
+import Checkout from '../components/Checkout';
 
 interface CurrentSub {
   id: string;
@@ -46,8 +46,18 @@ export default function PricingPage() {
   }, [checkoutPlan]);
 
   useEffect(() => {
-    setReturnTo(videoReturnTo(new URLSearchParams(window.location.search).get('return_to')));
+    const params = new URLSearchParams(window.location.search);
+    setReturnTo(videoReturnTo(params.get('return_to')));
+    // Back from a card payment via /checkout/return, which only redirects here once paid.
+    if (params.get('subscribed') === '1') setSuccess(true);
   }, []);
+
+  /** Where /checkout/return lands after a completed card payment. */
+  function cardReturnPath(): string {
+    const params = new URLSearchParams({ subscribed: '1' });
+    if (returnTo) params.set('return_to', returnTo);
+    return `/pricing?${params.toString()}`;
+  }
 
   const load = useCallback(async () => {
     try {
@@ -166,9 +176,10 @@ export default function PricingPage() {
               Cancel
             </button>
           </div>
-          <EcoCashCheckout
+          <Checkout
             key={checkoutPlan.id}
             target={{ kind: 'subscription', planId: checkoutPlan.id }}
+            returnPath={cardReturnPath()}
             listPrice={checkoutPlan.base_price}
             initialCurrency={currency}
             onCompleted={() => {
@@ -276,7 +287,8 @@ export default function PricingPage() {
       </div>
 
       <p className="mt-8 text-xs text-ink-dim">
-        Pay with EcoCash (USD or ZWG). Your subscription starts once the payment is confirmed.
+        Pay with EcoCash (USD or ZWG) or by card (USD or ZAR). Your subscription starts once the
+        payment is confirmed.
       </p>
     </div>
   );

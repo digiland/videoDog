@@ -9,8 +9,8 @@ async function searchVideos(q: string): Promise<Video[]> {
   try {
     const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}`, { cache: 'no-store' });
     if (!res.ok) return [];
-    const data = (await res.json()) as { items?: Video[] } | Video[];
-    if (Array.isArray(data)) return data;
+    // GET /search → { items, total }.
+    const data = (await res.json()) as { items: Video[]; total: number };
     return data.items ?? [];
   } catch {
     return [];
@@ -24,7 +24,7 @@ export default async function SearchPage({
 }) {
   const params = await searchParams;
   const q = params.q ?? '';
-  const results = await searchVideos(q);
+  const videos = await searchVideos(q);
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-8">
@@ -35,15 +35,15 @@ export default async function SearchPage({
 
       {q && (
         <p className="text-gray-400 text-sm mb-6">
-          {results.length === 0
+          {videos.length === 0
             ? `No results for "${q}"`
-            : `${results.length} result${results.length === 1 ? '' : 's'} for "${q}"`}
+            : `${videos.length} result${videos.length === 1 ? '' : 's'} for "${q}"`}
         </p>
       )}
 
-      {results.length > 0 ? (
+      {videos.length > 0 ? (
         <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
-          {results.map((video) => (
+          {videos.map((video) => (
             <VideoCard key={video.id} video={video} />
           ))}
         </div>

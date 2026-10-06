@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '../../../src/lib/api';
 import type { MoneyDTO, Video } from '../../../src/types/api';
-import EcoCashCheckout from '../../components/EcoCashCheckout';
+import Checkout from '../../components/Checkout';
 
 type LoadState =
   | { status: 'loading' }
@@ -90,8 +90,9 @@ export default function PurchasePage() {
                 This video can&rsquo;t be bought individually.
               </p>
             ) : (
-              <EcoCashCheckout
+              <Checkout
                 target={{ kind: 'purchase', videoId: id }}
+                returnPath={`/v/${id}`}
                 listPrice={state.price}
                 initialCurrency={state.price.currency}
                 onCompleted={() => router.replace(`/v/${id}`)}

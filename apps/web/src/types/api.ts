@@ -133,6 +133,8 @@ export interface CreatePaymentResponse {
   payment_id: string;
   provider_ref: string | null;
   status: PaymentState;
+  /** Card (Paystack) payments: send the browser here to pay. Absent on idempotent replays. */
+  redirect_url?: string;
 }
 
 export type PaymentState = 'initiated' | 'pending' | 'completed' | 'failed' | 'reversed';

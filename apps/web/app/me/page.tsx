@@ -9,6 +9,12 @@ import type { User } from '../../src/types/api';
 const CURRENCIES = ['USD', 'ZWG', 'ZAR'];
 type Role = 'viewer' | 'creator' | 'admin';
 
+const KYC_LABEL: Record<User['kyc_state'], string> = {
+  none: 'Not verified',
+  phone_verified: 'Phone verified',
+  id_verified: 'Verified',
+};
+
 const ROLE_BADGE: Record<Role, { label: string; tone: string }> = {
   viewer: { label: 'Viewer', tone: 'bg-surface text-ink-mute' },
   creator: { label: 'Creator', tone: 'bg-accent/15 text-accent' },
@@ -29,6 +35,10 @@ export default function ProfilePage() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nationalId, setNationalId] = useState('');
+  const [kycBusy, setKycBusy] = useState(false);
+  const [kycError, setKycError] = useState<string | null>(null);
+  const [kycSubmitted, setKycSubmitted] = useState(false);
 
   useEffect(() => {
     if (!isAuthenticated()) {
@@ -67,6 +77,26 @@ export default function ProfilePage() {
       setError(err instanceof Error ? err.message : 'Failed to save.');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleKycSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setKycError(null);
+    if (!nationalId.trim()) {
+      setKycError('Enter your national ID number.');
+      return;
+    }
+    setKycBusy(true);
+    try {
+      await api.post<{ status: string }>('/users/me/kyc/id', { national_id: nationalId.trim() });
+      setKycSubmitted(true);
+      setNationalId('');
+    } catch (err: unknown) {
+      // The API's validation messages are written for people; show them as-is.
+      setKycError(err instanceof Error ? err.message : 'Could not submit your ID.');
+    } finally {
+      setKycBusy(false);
     }
   }
 
@@ -228,6 +258,67 @@ export default function ProfilePage() {
           >
             Open Studio
           </Link>
+        </section>
+      )}
+
+      {role === 'creator' && (
+        <section className="bg-bg-elev border border-line rounded-lg p-6 mb-6">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <h3 className="text-lg font-semibold">Verify your identity</h3>
+            <span
+              className={`text-xs px-2 py-0.5 rounded ${
+                user.kyc_state === 'id_verified' ? 'bg-ok/15 text-ok' : 'bg-surface text-ink-mute'
+              }`}
+            >
+              {KYC_LABEL[user.kyc_state] ?? user.kyc_state}
+            </span>
+          </div>
+          {user.kyc_state === 'id_verified' ? (
+            <p className="text-ink-mute text-sm">Your national ID has been verified.</p>
+          ) : kycSubmitted ? (
+            <p className="text-sm text-ok" aria-live="polite">
+              Submitted — awaiting review.
+            </p>
+          ) : (
+            <form onSubmit={(e) => void handleKycSubmit(e)} className="space-y-3">
+              <p className="text-ink-mute text-sm">
+                Add your Zimbabwe national ID so we can verify payouts. It&rsquo;s stored encrypted
+                and only reviewed by our team.
+              </p>
+              <div>
+                <label htmlFor="me-national-id" className="block text-sm font-medium mb-1.5">
+                  National ID number
+                </label>
+                <input
+                  id="me-national-id"
+                  type="text"
+                  autoComplete="off"
+                  autoCapitalize="characters"
+                  spellCheck={false}
+                  value={nationalId}
+                  onChange={(e) => {
+                    setNationalId(e.target.value);
+                    setKycError(null);
+                  }}
+                  placeholder="63-123456 A 12"
+                  disabled={kycBusy}
+                  className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2 placeholder:text-ink-dim focus:outline-none transition font-mono"
+                />
+              </div>
+              {kycError && (
+                <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
+                  {kycError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={kycBusy}
+                className="bg-accent hover:bg-accent-hot text-bg font-semibold py-2 px-5 rounded-md text-sm transition disabled:opacity-50"
+              >
+                {kycBusy ? 'Submitting…' : 'Submit for review'}
+              </button>
+            </form>
+          )}
         </section>
       )}
 

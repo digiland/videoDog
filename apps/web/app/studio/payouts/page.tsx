@@ -6,19 +6,24 @@ import { api } from '../../../src/lib/api';
 import { isAuthenticated } from '../../../src/lib/auth';
 import { formatMoney } from '../../../src/lib/format';
 import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
+import PayoutNumberSetup from '../../components/PayoutNumberSetup';
 
 interface Balance {
   currency: string;
   balance_minor: string;
 }
 
-type PayoutCurrency = 'USD' | 'ZWG' | 'ZAR';
+type PayoutCurrency = 'USD' | 'ZWG';
 
-const CURRENCIES: readonly PayoutCurrency[] = ['USD', 'ZWG', 'ZAR'];
+/** ZAR is listed but disabled: there is no ZAR payout rail yet (the API rejects it). */
+const CURRENCY_OPTIONS: ReadonlyArray<{ code: string; available: PayoutCurrency | null }> = [
+  { code: 'USD', available: 'USD' },
+  { code: 'ZWG', available: 'ZWG' },
+  { code: 'ZAR', available: null },
+];
 const MIN_PAYOUT: Record<PayoutCurrency, { minor: bigint; display: string }> = {
   USD: { minor: 500n, display: '$5.00' },
   ZWG: { minor: 15000n, display: 'ZWG 150' },
-  ZAR: { minor: 10000n, display: 'R 100' },
 };
 
 export default function PayoutsPage() {
@@ -26,9 +31,9 @@ export default function PayoutsPage() {
   const [balances, setBalances] = useState<Balance[] | null>(null);
   const [currency, setCurrency] = useState<PayoutCurrency>('USD');
   const [amount, setAmount] = useState('');
-  // Payouts always go to the number saved on the profile; the API ignores any other number.
+  // Payouts always go to the number saved on the profile (changed only with an OTP).
   const [savedMsisdn, setSavedMsisdn] = useState<string | null>(null);
-  const [msisdn, setMsisdn] = useState('');
+  const [accountPhone, setAccountPhone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -47,16 +52,17 @@ export default function PayoutsPage() {
         api.get<{ balances: Array<{ currency: string; balance_minor: string }> }>(
           '/wallet/balance',
         ),
-        api.get<{ payout_msisdn: string | null }>('/users/me'),
+        api.get<{ payout_msisdn: string | null; phone_e164: string }>('/users/me'),
       ]);
       setBalances(data.balances);
       setSavedMsisdn(me.payout_msisdn);
+      setAccountPhone(me.phone_e164);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load balances');
     }
   }
 
-  // Earnings are held in USD; ZWG/ZAR payouts are converted from it at the day's rate,
+  // Earnings are held in USD; ZWG payouts are converted from it at the day's rate,
   // so only a USD request can be checked against the balance here.
   const usdBalance = balances?.find((b) => b.currency === 'USD');
   const balanceMinor = usdBalance ? BigInt(usdBalance.balance_minor) : 0n;
@@ -69,12 +75,6 @@ export default function PayoutsPage() {
     setError(null);
     setSuccess(null);
     try {
-      if (!savedMsisdn) {
-        const me = await api.patch<{ payout_msisdn: string | null }>('/users/me', {
-          payout_msisdn: msisdn.trim(),
-        });
-        setSavedMsisdn(me.payout_msisdn);
-      }
       if (requestedMinor === null) throw new Error('Enter a valid amount.');
       // JSON number only at the API boundary; payout amounts are far below 2^53.
       await api.post('/wallet/payout', {
@@ -95,7 +95,7 @@ export default function PayoutsPage() {
     requestedMinor !== null &&
     requestedMinor >= min.minor &&
     (currency !== 'USD' || requestedMinor <= balanceMinor) &&
-    (savedMsisdn !== null || /^\+[1-9]\d{7,14}$/.test(msisdn.trim()));
+    savedMsisdn !== null;
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-10 fade-up">
@@ -126,6 +126,21 @@ export default function PayoutsPage() {
         )}
       </section>
 
+      {/* Payout number */}
+      <section className="mt-8 bg-bg-elev border border-line rounded-lg p-6">
+        <h2 className="text-lg font-semibold mb-4">Payout number</h2>
+        {accountPhone ? (
+          <PayoutNumberSetup
+            key={savedMsisdn ?? 'unset'}
+            accountPhone={accountPhone}
+            savedMsisdn={savedMsisdn}
+            onSaved={setSavedMsisdn}
+          />
+        ) : (
+          <p className="text-sm text-ink-dim">Loading…</p>
+        )}
+      </section>
+
       {/* Request form */}
       <section className="mt-8 bg-bg-elev border border-line rounded-lg p-6">
         <h2 className="text-lg font-semibold mb-4">Request a payout</h2>
@@ -134,16 +149,22 @@ export default function PayoutsPage() {
           <fieldset>
             <legend className="block text-sm font-medium mb-1.5">Currency</legend>
             <div className="flex gap-2">
-              {CURRENCIES.map((c) => (
+              {CURRENCY_OPTIONS.map(({ code, available }) => (
                 <button
-                  key={c}
+                  key={code}
                   type="button"
-                  onClick={() => setCurrency(c)}
-                  className={`text-sm font-medium px-4 py-2 rounded-md transition ${
-                    currency === c ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
+                  disabled={!available}
+                  onClick={() => available && setCurrency(available)}
+                  className={`text-sm font-medium px-4 py-2 rounded-md transition disabled:cursor-not-allowed ${
+                    currency === code
+                      ? 'bg-accent text-bg'
+                      : available
+                        ? 'bg-surface text-ink-mute hover:text-ink'
+                        : 'bg-surface text-ink-dim opacity-60'
                   }`}
                 >
-                  {c}
+                  {code}
+                  {!available && <span className="ml-1 text-[10px] uppercase">coming soon</span>}
                 </button>
               ))}
             </div>
@@ -170,32 +191,10 @@ export default function PayoutsPage() {
             </p>
           </div>
 
-          {savedMsisdn ? (
-            <p className="text-sm">
-              Paid to EcoCash <span className="font-mono">{savedMsisdn}</span>. To change it, update
-              your{' '}
-              <Link href="/me" className="text-accent hover:underline">
-                profile
-              </Link>
-              .
+          {!savedMsisdn && (
+            <p className="text-sm text-ink-mute">
+              Set a payout number below before requesting a payout.
             </p>
-          ) : (
-            <div>
-              <label htmlFor="payout-msisdn" className="block text-sm font-medium mb-1.5">
-                EcoCash number
-              </label>
-              <input
-                id="payout-msisdn"
-                type="tel"
-                value={msisdn}
-                onChange={(e) => setMsisdn(e.target.value)}
-                placeholder="+263771234567"
-                className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2 placeholder:text-ink-dim focus:outline-none transition font-mono"
-              />
-              <p className="mt-1 text-xs text-ink-dim">
-                E.164 format with country code. Saved to your profile as your payout number.
-              </p>
-            </div>
           )}
 
           {error && (
