@@ -2,18 +2,11 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-/**
- * HLS ladder. Bitrates lean low on purpose: most viewers are on prepaid mobile data, so
- * 240p/480p must look decent at small sizes, and low renditions carry 64 kbps audio.
- */
-export const LADDER = [
-  { height: 240, videoKbps: 300, audioKbps: 64 },
-  { height: 480, videoKbps: 700, audioKbps: 64 },
-  { height: 720, videoKbps: 1500, audioKbps: 96 },
-  { height: 1080, videoKbps: 3000, audioKbps: 128 },
-] as const;
+import { RENDITION_LADDER, type Rendition } from '@streamzw/shared';
 
-export type Rendition = (typeof LADDER)[number];
+/** The ladder lives in @streamzw/shared so apps can show each quality's data cost. */
+export const LADDER = RENDITION_LADDER;
+export type { Rendition };
 
 /** Segment length in seconds. Keyframes are forced on this grid in every rendition. */
 export const SEGMENT_SECONDS = 6;

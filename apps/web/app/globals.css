@@ -2,51 +2,129 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Kopje — StreamZW design tokens. See docs/DESIGN.md.
+ *
+ * Dark-first: video is watched in the dark, and dark pixels cost OLED phones less battery.
+ * Light theme follows the OS (bright outdoor light) or an explicit data-theme toggle.
+ * Granite neutrals carry a warm bias; copper (msasa leaves in spring) is the one action
+ * colour. Gold and sage are semantic: premium and free. Every text pair passes WCAG AA.
+ */
 :root {
-  --bg: #0f171e;
-  --bg-elev: #131c25;
-  --surface: #1a242f;
-  --surface-2: #22303d;
-  --line: #2a3744;
-  --line-strong: #3a4a5a;
-
-  --ink: #ffffff;
-  --ink-mute: #c2cad3;
-  --ink-dim: #7a8794;
-
-  --accent: #00a8e1;       /* Prime-style cyan-blue */
-  --accent-hot: #1fb6ec;
-  --warn: #f5a623;
-  --ok: #1fc16b;
+  --bg: #121110;
+  --surface: #1b1917;
+  --surface-2: #25221f;
+  --line: #38332d;
+  --line-strong: #4a443c;
+  --ink: #f3efe9;
+  --ink-2: #bdb4a8;
+  --ink-3: #9a9084;
+  --accent: #e8834f;
+  --accent-strong: #f09a6a;
+  --on-accent: #1a0d05;
+  --gold: #e6b84a;
+  --sage: #93b98d;
+  --danger: #f06b5a;
+  --scrim: rgb(18 17 16 / 0.72);
+  color-scheme: dark;
 }
 
-html, body {
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --bg: #ffffff;
+    --surface: #f4f3f1;
+    --surface-2: #e9e7e3;
+    --line: #d6d2cc;
+    --line-strong: #bdb7af;
+    --ink: #16130f;
+    --ink-2: #4f4840;
+    --ink-3: #6e655b;
+    --accent: #a0461a;
+    --accent-strong: #8a3a12;
+    --on-accent: #ffffff;
+    --gold: #875f00;
+    --sage: #3b6a36;
+    --danger: #b42318;
+    --scrim: rgb(255 255 255 / 0.8);
+    color-scheme: light;
+  }
+}
+
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --surface: #f4f3f1;
+  --surface-2: #e9e7e3;
+  --line: #d6d2cc;
+  --line-strong: #bdb7af;
+  --ink: #16130f;
+  --ink-2: #4f4840;
+  --ink-3: #6e655b;
+  --accent: #a0461a;
+  --accent-strong: #8a3a12;
+  --on-accent: #ffffff;
+  --gold: #875f00;
+  --sage: #3b6a36;
+  --danger: #b42318;
+  --scrim: rgb(255 255 255 / 0.8);
+  color-scheme: light;
+}
+
+html,
+body {
   background: var(--bg);
   color: var(--ink);
-  font-family: var(--font-sans, ui-sans-serif, system-ui);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
 }
 
-/* Skeleton shimmer */
-@keyframes shimmer { 0% { background-position: -480px 0; } 100% { background-position: 480px 0; } }
+/* System fonts only: zero bytes to download, Roboto on Android, SF on iOS. */
+:root {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Helvetica Neue',
+    Arial, sans-serif;
+}
+
+/* Prices, durations, counts: digits that line up and don't jitter. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Static placeholder: no infinite shimmer (it burns battery and repaints every frame). */
 .skeleton {
-  background: linear-gradient(90deg, var(--surface) 0%, var(--surface-2) 50%, var(--surface) 100%);
-  background-size: 480px 100%;
-  animation: shimmer 1.6s linear infinite;
+  background: var(--surface-2);
 }
 
-@keyframes fade-up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.fade-up { animation: fade-up 0.4s ease-out both; }
-
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-::selection { background: var(--accent); color: #001b29; }
-
-.no-scrollbar::-webkit-scrollbar { display: none; }
-.no-scrollbar { scrollbar-width: none; }
-
-/* Horizontal row */
-.row-scroll {
-  scroll-snap-type: x mandatory;
-  scroll-padding-left: 1.5rem;
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
-.row-scroll > * { scroll-snap-align: start; }
+::selection {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  scrollbar-width: none;
+}
+
+/* Thumb-reach bottom bar needs room on phones; safe-area for gesture bars. */
+.pb-tabbar {
+  padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  .pb-tabbar {
+    padding-bottom: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
