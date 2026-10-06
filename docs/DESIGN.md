@@ -30,6 +30,8 @@ All colour comes from CSS variables. Dark is the default; light follows the OS o
 | `--sage`      | `text-sage`                 | `#93b98d` | `#3b6a36` | Free, success (semantic only)                                                             |
 | `--danger`    | `text-danger`               | `#f06b5a` | `#b42318` | Errors, destructive actions                                                               |
 
+The video player is an always-dark island: wrap it in `.theme-dark` (redefines every token to its dark value) so video chrome and letterboxing stay dark in the light theme.
+
 Every text/background pair above passes WCAG AA (4.5:1) on `bg`, `surface` and `surface-2` in both themes. Accent is for action; gold and sage carry meaning, not decoration.
 
 **Type.** System font stack (Roboto on Android, SF on iOS), zero bytes. Scale: `xs 12 · sm 14 · base 16 · lg 18 · xl 20 · 2xl 24 · 3xl 30`. Body text is 16px on phones. Weights: 400 body, 600 labels/buttons, 700 headings. Use the `num` class (tabular figures) for prices, durations and counts.
