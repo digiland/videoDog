@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { videos } from '../../db/schema';
 
@@ -11,7 +11,7 @@ export class VideosRepository {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   /** Published videos matching `q` via the generated `search_doc` tsvector, best first. */
-  searchPublished(q: string, mode: AccessMode | undefined, limit: number) {
+  searchPublished(q: string, modes: AccessMode[] | undefined, limit: number) {
     const query = sql`websearch_to_tsquery('english', ${q})`;
     return this.db
       .select()
@@ -20,7 +20,7 @@ export class VideosRepository {
         and(
           eq(videos.state, 'published'),
           sql`${videos}.search_doc @@ ${query}`,
-          mode ? eq(videos.accessMode, mode) : undefined,
+          modes ? inArray(videos.accessMode, modes) : undefined,
         ),
       )
       .orderBy(sql`ts_rank(${videos}.search_doc, ${query}) DESC`, videos.id)

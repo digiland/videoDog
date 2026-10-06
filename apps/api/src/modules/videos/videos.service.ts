@@ -370,7 +370,10 @@ export class VideosService {
     includeUnpublished?: boolean;
   }) {
     const limit = Math.min(Math.max(Number.isFinite(filters.limit) ? filters.limit! : 20, 1), 100);
-    const mode = filters.mode ? AccessModeSchema.safeParse(filters.mode) : undefined;
+    // `mode` is one access mode or a comma-separated list (e.g. "premium,premium_buyable").
+    const mode = filters.mode
+      ? z.array(AccessModeSchema).min(1).max(4).safeParse(filters.mode.split(','))
+      : undefined;
     if (mode && !mode.success) {
       throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
     }
@@ -387,7 +390,7 @@ export class VideosService {
       conditions.push(eq(videos.state, 'published'));
     }
 
-    if (mode?.data) conditions.push(eq(videos.accessMode, mode.data));
+    if (mode?.data) conditions.push(inArray(videos.accessMode, mode.data));
     if (filters.creatorId) {
       conditions.push(eq(videos.ownerId, filters.creatorId));
     }
@@ -449,10 +452,11 @@ export class VideosService {
 
   async getSignedPlaylistUrl(videoId: string, viewer: Viewer, apiBase: string) {
     const video = await this.getVisible(videoId, viewer);
-    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('Playable video');
 
+    // Paywall first: someone without access learns how to unlock, not that media is missing.
     const access = await this.access.checkAccess(await this.accessUser(viewer), video);
     if (!access.ok) return { access_denied: true, paywall: access.paywall };
+    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('Playable video');
 
     const grant = await this.playback.grant(video.id, video.hlsPlaylistKey, apiBase);
 

@@ -152,4 +152,16 @@ describe.skipIf(!hasDb)('video visibility and playback grants (integration)', ()
     await videos.unpublish(live.id, owner.id);
     await expect(videos.findById(live.id, null)).rejects.toThrow(/not found/i);
   });
+
+  it('filters by a list of access modes', async () => {
+    const owner = await makeUser(db, { role: 'creator' });
+    const both = await makeVideo(db, owner.id, {
+      accessMode: 'premium_buyable',
+      ppvPriceMinorUnits: '100',
+    });
+    const { items } = await videos.list({ creatorId: owner.id, mode: 'ppv,premium_buyable' });
+    expect(items.map((v) => v.id)).toContain(both.id);
+    const free = await videos.list({ creatorId: owner.id, mode: 'free' });
+    expect(free.items.map((v) => v.id)).not.toContain(both.id);
+  });
 });
