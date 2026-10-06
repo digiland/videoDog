@@ -25,6 +25,7 @@
     "@nestjs/jwt": "^11.0.2",
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.0.0",
+    "@nestjs/schedule": "^6",
     "@streamzw/shared": "workspace:*",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.77.4",
