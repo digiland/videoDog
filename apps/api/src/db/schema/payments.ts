@@ -39,6 +39,8 @@ export const payments = pgTable(
     fxRateId: uuid('fx_rate_id'),
     intent: paymentIntentType('intent').notNull(),
     intentRefId: uuid('intent_ref_id'),
+    // E.164 number that was charged — reused to charge subscription renewals.
+    payerMsisdn: text('payer_msisdn'),
     state: paymentState('state').notNull().default('initiated'),
     idempotencyKey: text('idempotency_key').notNull().unique(),
     rawCallback: jsonb('raw_callback'),

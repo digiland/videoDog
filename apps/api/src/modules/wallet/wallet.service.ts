@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, desc, inArray } from 'drizzle-orm';
+import { and, eq, gte, lte, desc, inArray, sql } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
-import { accounts, ledgerEntries, payouts } from '../../db/schema';
+import { accounts, ledgerEntries, payouts, users } from '../../db/schema';
 import { LedgerService } from '../payments/ledger.service';
 import { FxService } from '../fx/fx.service';
 import { Money } from '@streamzw/shared';
@@ -18,7 +18,7 @@ const PAYOUT_THRESHOLDS: Record<string, bigint> = {
 const PayoutRequestSchema = z.object({
   amount_minor: z.number().int().positive(),
   currency: z.enum(['USD', 'ZWG', 'ZAR']),
-  msisdn: z.string().regex(/^\+[1-9]\d{1,14}$/, 'msisdn must be E.164'),
+  // `msisdn` is no longer accepted: payouts always go to the profile's payout_msisdn.
 });
 
 @Injectable()
@@ -80,6 +80,14 @@ export class WalletService {
     return { entries };
   }
 
+  /**
+   * Request a payout to the creator's verified payout number.
+   *
+   * Creator earnings are held in USD (`creator_balance.USD`). The balance check and the
+   * debit run in one DB transaction under an advisory lock on the creator's account, so two
+   * concurrent requests can't both spend the same balance. A ZWG/ZAR payout converts through
+   * `fx_holding` as two single-currency ledger transactions (§3.3).
+   */
   async requestPayout(userId: string, body: unknown) {
     const parsed = PayoutRequestSchema.safeParse(body);
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
@@ -88,71 +96,132 @@ export class WalletService {
     const currency = dto.currency as CurrencyCode;
     const requestedAmount = BigInt(dto.amount_minor);
 
-    // Check minimum threshold
     const threshold = PAYOUT_THRESHOLDS[currency];
     if (threshold && requestedAmount < threshold) {
       throw new ValidationError(`Minimum payout for ${currency} is ${threshold} minor units`);
     }
 
-    // Check balance
-    const accountId = await this.ledger.findOrCreateAccount({
-      scope: 'user',
-      ownerId: userId,
-      code: 'creator_balance',
-      currency,
+    // Never pay out to a number supplied in the request: a stolen session could redirect funds.
+    const [user] = await this.db
+      .select({ payoutMsisdn: users.payoutMsisdn })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    if (!user?.payoutMsisdn) {
+      throw new ValidationError('Set a payout number on your profile before requesting a payout');
+    }
+    const msisdn = user.payoutMsisdn;
+
+    const { usd, fxRate } = await this.fx.convertToUsd(new Money(requestedAmount, currency));
+    const usdAmount = usd.amount;
+    const fxRateId = fxRate.id === 'identity' ? undefined : fxRate.id;
+
+    return this.db.transaction(async (tx) => {
+      const balanceAcc = await this.ledger.findOrCreateAccount(
+        { scope: 'user', ownerId: userId, code: 'creator_balance', currency: 'USD' },
+        tx,
+      );
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${balanceAcc}))`);
+
+      const bal = await this.ledger.balance(balanceAcc, tx);
+      if (bal < usdAmount) throw new InsufficientBalanceError();
+
+      const [payout] = await tx
+        .insert(payouts)
+        .values({
+          creatorId: userId,
+          requestedAmountMinor: String(requestedAmount),
+          payoutCurrency: currency,
+          usdEquivalentMinor: String(usdAmount),
+          fxRateId: fxRateId ?? null,
+          msisdn,
+          state: 'requested',
+        })
+        .returning();
+      if (!payout) throw new Error('Failed to create payout');
+
+      const pendingAcc = await this.ledger.findOrCreateAccount(
+        { scope: 'system', code: 'payout_pending', currency },
+        tx,
+      );
+      const ref = { refType: 'payout', refId: payout.id, fxRateId };
+
+      if (currency === 'USD') {
+        await this.ledger.recordTransaction(
+          [
+            {
+              accountId: balanceAcc,
+              debitMinor: usdAmount,
+              creditMinor: 0n,
+              currency: 'USD',
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+            },
+            {
+              accountId: pendingAcc,
+              debitMinor: 0n,
+              creditMinor: usdAmount,
+              currency: 'USD',
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+            },
+          ],
+          tx,
+        );
+      } else {
+        const [holdingUsd, holdingLocal] = await Promise.all([
+          this.ledger.findOrCreateAccount(
+            { scope: 'system', code: 'fx_holding', currency: 'USD' },
+            tx,
+          ),
+          this.ledger.findOrCreateAccount({ scope: 'system', code: 'fx_holding', currency }, tx),
+        ]);
+        await this.ledger.recordTransaction(
+          [
+            {
+              accountId: balanceAcc,
+              debitMinor: usdAmount,
+              creditMinor: 0n,
+              currency: 'USD',
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+            },
+            {
+              accountId: holdingUsd,
+              debitMinor: 0n,
+              creditMinor: usdAmount,
+              currency: 'USD',
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+            },
+          ],
+          tx,
+        );
+        await this.ledger.recordTransaction(
+          [
+            {
+              accountId: holdingLocal,
+              debitMinor: requestedAmount,
+              creditMinor: 0n,
+              currency,
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+              refType: 'fx_conversion',
+            },
+            {
+              accountId: pendingAcc,
+              debitMinor: 0n,
+              creditMinor: requestedAmount,
+              currency,
+              usdEquivalentMinor: usdAmount,
+              ...ref,
+            },
+          ],
+          tx,
+        );
+      }
+
+      return { payout_id: payout.id, status: 'requested', msisdn };
     });
-
-    const bal = await this.ledger.balance(accountId);
-    if (bal < requestedAmount) throw new InsufficientBalanceError();
-
-    // Get USD equivalent
-    const amountMoney = new Money(requestedAmount, currency);
-    const { usd, fxRate } = await this.fx.convertToUsd(amountMoney);
-
-    // Insert payout row
-    const [payout] = await this.db
-      .insert(payouts)
-      .values({
-        creatorId: userId,
-        requestedAmountMinor: String(requestedAmount),
-        payoutCurrency: currency,
-        usdEquivalentMinor: String(usd.amount),
-        fxRateId: fxRate.id === 'identity' ? null : fxRate.id,
-        msisdn: dto.msisdn,
-        state: 'requested',
-      })
-      .returning();
-
-    // Write ledger: Dr creator_balance, Cr payout_pending
-    const payoutPendingAcc = await this.ledger.findOrCreateAccount({
-      scope: 'system',
-      code: 'payout_pending',
-      currency,
-    });
-
-    await this.ledger.recordTransaction([
-      {
-        accountId,
-        debitMinor: requestedAmount,
-        creditMinor: 0n,
-        currency,
-        usdEquivalentMinor: usd.amount,
-        fxRateId: fxRate.id === 'identity' ? undefined : fxRate.id,
-        refType: 'payout',
-        refId: payout!.id,
-      },
-      {
-        accountId: payoutPendingAcc,
-        debitMinor: 0n,
-        creditMinor: requestedAmount,
-        currency,
-        usdEquivalentMinor: usd.amount,
-        fxRateId: fxRate.id === 'identity' ? undefined : fxRate.id,
-        refType: 'payout',
-        refId: payout!.id,
-      },
-    ]);
-
-    return { payout_id: payout!.id, status: 'requested' };
   }
 }

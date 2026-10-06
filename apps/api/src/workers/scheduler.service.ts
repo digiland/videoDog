@@ -5,11 +5,13 @@ import { FxService } from '../modules/fx/fx.service';
 import { RbzScraper } from '../modules/fx/rbz.scraper';
 import { OxrClient } from '../modules/fx/oxr.client';
 import { SubscriptionsService } from '../modules/subscriptions/subscriptions.service';
+import { bullmqConnection } from '../common/bullmq-connection';
 
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
   private readonly premiumPoolQueue: Queue;
+  private readonly watchAggregateQueue: Queue;
 
   constructor(
     private readonly fxService: FxService,
@@ -18,10 +20,26 @@ export class SchedulerService {
     private readonly subscriptionsService: SubscriptionsService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.premiumPoolQueue = new Queue('payouts.calculate_premium_pool', {
-      connection: { url: redisUrl } as any,
+      connection: bullmqConnection(redisUrl),
     });
+    this.watchAggregateQueue = new Queue('watch.aggregate', {
+      connection: bullmqConnection(redisUrl),
+    });
+  }
+
+  /**
+   * Daily watch-minute rollup (00:30 UTC) of yesterday's sessions into watch_minutes_daily.
+   * The premium pool distributes by these rows, so without this job it pays nobody.
+   */
+  @Cron('30 0 * * *')
+  async enqueueWatchAggregation() {
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      await this.watchAggregateQueue.add('aggregate', {}, { jobId: `watch-aggregate:${day}` });
+    } catch (err) {
+      this.logger.error('Failed to enqueue watch aggregation job', err);
+    }
   }
 
   /**

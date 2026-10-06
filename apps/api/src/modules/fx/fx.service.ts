@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, gt, isNull, lte, or } from 'drizzle-orm';
 import Redis from 'ioredis';
 import { DB, type Db } from '../../db/db.module';

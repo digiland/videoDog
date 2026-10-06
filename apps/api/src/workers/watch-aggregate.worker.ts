@@ -1,17 +1,17 @@
 import { Logger } from '@nestjs/common';
 import { Worker } from 'bullmq';
-import { sql, and, eq, gte, lt } from 'drizzle-orm';
+import { sql, and, gte, lt } from 'drizzle-orm';
 import type { Db } from '../db/db.module';
 import { watchSessions, watchMinutesDaily } from '../db/schema';
+import { bullmqConnection } from '../common/bullmq-connection';
 
 const logger = new Logger('WatchAggregateWorker');
 
 export function createWatchAggregateWorker(redisUrl: string, db: Db): Worker {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const conn = { url: redisUrl } as any;
+  const conn = bullmqConnection(redisUrl);
   return new Worker(
     'watch.aggregate',
-    async (job) => {
+    async () => {
       const now = new Date();
       const yesterday = new Date(now);
       yesterday.setDate(yesterday.getDate() - 1);

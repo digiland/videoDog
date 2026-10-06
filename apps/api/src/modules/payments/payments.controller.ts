@@ -1,9 +1,11 @@
 import { Body, Controller, Headers, Post, Req, UseGuards } from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { JwtGuard } from '../auth/jwt.guard';
 import { RequireAuthGuard } from '../auth/require-auth.guard';
 import type { AuthenticatedRequest } from '../auth/jwt.guard';
 import { PaymentsService } from './payments.service';
+import { ValidationError } from '../auth/errors';
 
 @Controller()
 export class PaymentsController {
@@ -17,14 +19,12 @@ export class PaymentsController {
 
   @Post('webhooks/ecocash')
   async ecocashWebhook(
-    @Req() req: Request,
-    @Headers('x-ecocash-signature') sig: string,
-    @Body() body: unknown,
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('x-ecocash-signature') sig: string | undefined,
   ) {
-    const payload = (req as any).rawBody?.toString('utf8') ?? JSON.stringify(body);
-    const currency = (body as { currency?: string })?.currency ?? 'USD';
-    const provider = currency === 'ZWG' ? 'ecocash_zwg' : 'ecocash_usd';
-    return this.payments.handleEcocashWebhook(payload, sig ?? '', provider);
+    // HMAC must be checked over the exact bytes received; a re-serialised body won't match.
+    if (!req.rawBody) throw new ValidationError('Missing webhook body');
+    return this.payments.handleEcocashWebhook(req.rawBody.toString('utf8'), sig ?? '');
   }
 
   @Post('webhooks/zipit')

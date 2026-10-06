@@ -14,6 +14,18 @@ export interface ChargeResult {
   status: 'pending' | 'completed' | 'failed';
 }
 
+/**
+ * An empty HMAC key makes every webhook signature forgeable, so production refuses to boot
+ * without one. Dev keeps the empty default so webhooks can be simulated locally.
+ */
+function requireWebhookSecret(): string {
+  const secret = process.env.ECOCASH_WEBHOOK_SECRET ?? '';
+  if (process.env.NODE_ENV === 'production' && secret.length < 16) {
+    throw new Error('ECOCASH_WEBHOOK_SECRET must be set (16+ chars) in production');
+  }
+  return secret;
+}
+
 export class EcocashUsdClient {
   private readonly merchantCode: string;
   private readonly apiKey: string;
@@ -23,7 +35,7 @@ export class EcocashUsdClient {
   constructor() {
     this.merchantCode = process.env.ECOCASH_USD_MERCHANT_CODE ?? '';
     this.apiKey = process.env.ECOCASH_USD_API_KEY ?? '';
-    this.webhookSecret = process.env.ECOCASH_WEBHOOK_SECRET ?? '';
+    this.webhookSecret = requireWebhookSecret();
     this.dev = process.env.NODE_ENV !== 'production';
   }
 
@@ -74,7 +86,7 @@ export class EcocashZwgClient {
   constructor() {
     this.merchantCode = process.env.ECOCASH_ZWG_MERCHANT_CODE ?? '';
     this.apiKey = process.env.ECOCASH_ZWG_API_KEY ?? '';
-    this.webhookSecret = process.env.ECOCASH_WEBHOOK_SECRET ?? '';
+    this.webhookSecret = requireWebhookSecret();
     this.dev = process.env.NODE_ENV !== 'production';
   }
 

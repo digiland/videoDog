@@ -5,11 +5,13 @@ import { DB, type Db } from '../../db/db.module';
 import { captions, users as schema_users, videos, purchases } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
+import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
 import { originalKey, Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
+import { bullmqConnection } from '../../common/bullmq-connection';
 
 const CreateVideoSchema = z.object({
   title: z.string().min(1).max(255),
@@ -35,11 +37,11 @@ export class VideosService {
     @Inject(DB) private readonly db: Db,
     private readonly storage: StorageService,
     private readonly access: AccessService,
+    private readonly fx: FxService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.transcodeQueue = new Queue('transcode', {
-      connection: { url: redisUrl } as any,
+      connection: bullmqConnection(redisUrl),
     });
   }
 

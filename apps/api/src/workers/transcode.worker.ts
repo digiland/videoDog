@@ -8,6 +8,7 @@ import type { StorageService } from '../storage/storage.service';
 import { originalKey, masterPlaylistKey, renditionPlaylistKey } from '@streamzw/shared';
 import { videos, renditions } from '../db/schema';
 import { eq } from 'drizzle-orm';
+import { bullmqConnection } from '../common/bullmq-connection';
 
 const logger = new Logger('TranscodeWorker');
 
@@ -18,8 +19,7 @@ const RENDITIONS = [
 ];
 
 export function createTranscodeWorker(redisUrl: string, db: Db, storage: StorageService): Worker {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const conn = { url: redisUrl } as any;
+  const conn = bullmqConnection(redisUrl);
   const thumbnailQueue = new Queue('thumbnail.extract', { connection: conn });
 
   return new Worker(
