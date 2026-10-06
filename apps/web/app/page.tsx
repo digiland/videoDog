@@ -33,7 +33,7 @@ export default async function HomePage({
       {/* Hero banner */}
       <section className="relative h-[60vh] min-h-[420px] max-h-[640px] w-full overflow-hidden border-b border-line">
         {featured?.thumbnail_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
+          // eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature.
           <img
             src={featured.thumbnail_url}
             alt={featured.title}

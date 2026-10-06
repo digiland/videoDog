@@ -1,15 +1,13 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '../../src/lib/api';
-import { getAccessToken } from '../../src/lib/auth';
-
-interface PlanQuote {
-  plan_id: string;
-  code: string;
-  duration_days: number;
-  amount: { amount: string; currency: string };
-}
+import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
+import { formatMoney } from '../../src/lib/format';
+import { currentPath, safeReturnTo, signInHref } from '../../src/lib/return-to';
+import type { MoneyDTO, SubscriptionPlan } from '../../src/types/api';
+import EcoCashCheckout from '../components/EcoCashCheckout';
 
 interface CurrentSub {
   id: string;
@@ -21,31 +19,47 @@ interface CurrentSub {
 
 const CURRENCIES = ['USD', 'ZWG', 'ZAR'];
 
-function formatMoney(minor: string, currency: string) {
-  const n = Number(minor) / 100;
-  const sym = currency === 'USD' ? '$' : currency === 'ZAR' ? 'R ' : `${currency} `;
-  return `${sym}${n.toFixed(2)}`;
+/** Only same-site video pages are accepted as a post-subscribe destination. */
+function videoReturnTo(raw: string | null): string | null {
+  const safe = safeReturnTo(raw);
+  return safe && /^\/v\/[A-Za-z0-9-]+$/.test(safe) ? safe : null;
+}
+
+function signedIn(): boolean {
+  return isAuthenticated() || Boolean(getRefreshToken());
 }
 
 export default function PricingPage() {
   const router = useRouter();
-  const [plans, setPlans] = useState<PlanQuote[] | null>(null);
+  const [plans, setPlans] = useState<SubscriptionPlan[] | null>(null);
   const [currency, setCurrency] = useState('USD');
   const [current, setCurrent] = useState<CurrentSub | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const [checkoutPlan, setCheckoutPlan] = useState<SubscriptionPlan | null>(null);
+  const [success, setSuccess] = useState(false);
+  const [returnTo, setReturnTo] = useState<string | null>(null);
+  const checkoutRef = useRef<HTMLElement>(null);
+
+  // The checkout panel renders above the plan cards; bring it into view on phones.
+  useEffect(() => {
+    if (checkoutPlan) checkoutRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [checkoutPlan]);
+
+  useEffect(() => {
+    setReturnTo(videoReturnTo(new URLSearchParams(window.location.search).get('return_to')));
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      const data = await api.get<{ items: PlanQuote[] }>(
+      // GET /subscriptions/plans returns an array of plans; tolerate an `{ items }` envelope.
+      const data = await api.get<SubscriptionPlan[] | { items: SubscriptionPlan[] }>(
         `/subscriptions/plans?currency=${currency}`,
       );
-      setPlans(data.items);
+      setPlans(Array.isArray(data) ? data : data.items);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load plans');
     }
-    if (getAccessToken()) {
+    if (signedIn()) {
       try {
         const sub = await api.get<CurrentSub | null>('/subscriptions/me');
         setCurrent(sub);
@@ -59,23 +73,22 @@ export default function PricingPage() {
     void load();
   }, [load]);
 
-  async function subscribe(planId: string) {
-    if (!getAccessToken()) {
-      router.push('/sign-in');
+  function choosePlan(plan: SubscriptionPlan) {
+    if (!signedIn()) {
+      // Return here (keeping ?return_to=/v/…) after signing in.
+      router.push(signInHref(currentPath()));
       return;
     }
-    setBusy(planId);
-    setError(null);
-    setSuccess(null);
-    try {
-      await api.post('/subscriptions', { plan_id: planId, payment_currency: currency });
-      setSuccess('You are subscribed.');
-      await load();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to subscribe');
-    } finally {
-      setBusy(null);
-    }
+    setSuccess(false);
+    setCheckoutPlan(plan);
+  }
+
+  function priceLabel(p: SubscriptionPlan): { charge: MoneyDTO; approx: MoneyDTO | null } {
+    const approx =
+      p.display_price && p.display_price.currency !== p.base_price.currency
+        ? p.display_price
+        : null;
+    return { charge: p.base_price, approx };
   }
 
   return (
@@ -117,8 +130,54 @@ export default function PricingPage() {
       )}
       {success && (
         <div className="mt-6 bg-ok/10 border border-ok/30 rounded-md px-4 py-3 text-sm text-ok">
-          {success}
+          Payment confirmed — you are subscribed.
+          {returnTo && (
+            <>
+              {' '}
+              <Link href={returnTo} className="font-semibold underline">
+                Back to your video
+              </Link>
+            </>
+          )}
         </div>
+      )}
+
+      {checkoutPlan && !success && (
+        <section
+          ref={checkoutRef}
+          className="mt-6 bg-bg-elev border border-accent/40 rounded-lg p-6 max-w-lg scroll-mt-20"
+        >
+          <div className="flex items-start justify-between gap-4 mb-4">
+            <div>
+              <p className="text-sm text-ink-dim uppercase tracking-wide">Checkout</p>
+              <p className="text-lg font-semibold mt-1">
+                {checkoutPlan.code === 'day_pass'
+                  ? 'Day pass'
+                  : checkoutPlan.code === 'month'
+                    ? 'Monthly'
+                    : checkoutPlan.code}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCheckoutPlan(null)}
+              className="text-sm text-ink-mute hover:text-ink"
+            >
+              Cancel
+            </button>
+          </div>
+          <EcoCashCheckout
+            key={checkoutPlan.id}
+            target={{ kind: 'subscription', planId: checkoutPlan.id }}
+            listPrice={checkoutPlan.base_price}
+            initialCurrency={currency}
+            onCompleted={() => {
+              setSuccess(true);
+              setCheckoutPlan(null);
+              void load();
+            }}
+          />
+        </section>
       )}
 
       <div className="mt-8 grid sm:grid-cols-2 gap-4">
@@ -129,9 +188,10 @@ export default function PricingPage() {
         ) : (
           plans.map((p, i) => {
             const popular = i === 1;
+            const { charge, approx } = priceLabel(p);
             return (
               <article
-                key={p.plan_id}
+                key={p.id}
                 className={`relative bg-bg-elev border ${popular ? 'border-accent' : 'border-line'} rounded-lg p-8`}
               >
                 {popular && (
@@ -143,8 +203,14 @@ export default function PricingPage() {
                   {p.code === 'day_pass' ? 'Day pass' : p.code === 'month' ? 'Monthly' : p.code}
                 </p>
                 <p className="text-5xl font-bold mt-3">
-                  {formatMoney(p.amount.amount, p.amount.currency)}
+                  {formatMoney(charge.amount_minor, charge.currency)}
                 </p>
+                {approx && (
+                  <p className="text-sm text-ink-mute mt-1">
+                    ≈ {formatMoney(approx.amount_minor, approx.currency)}{' '}
+                    <span className="text-ink-dim">(approx.)</span>
+                  </p>
+                )}
                 <p className="text-sm text-ink-dim mt-1">
                   Every {p.duration_days} day{p.duration_days === 1 ? '' : 's'}
                 </p>
@@ -193,15 +259,15 @@ export default function PricingPage() {
 
                 <button
                   type="button"
-                  onClick={() => void subscribe(p.plan_id)}
-                  disabled={busy !== null}
+                  onClick={() => choosePlan(p)}
+                  disabled={checkoutPlan !== null}
                   className={`mt-8 w-full font-semibold py-3 rounded-md text-sm transition disabled:opacity-50 ${
                     popular
                       ? 'bg-accent hover:bg-accent-hot text-bg'
                       : 'bg-surface hover:bg-surface-2 text-ink border border-line'
                   }`}
                 >
-                  {busy === p.plan_id ? 'Processing…' : 'Subscribe'}
+                  {checkoutPlan?.id === p.id ? 'Selected' : 'Subscribe'}
                 </button>
               </article>
             );
@@ -210,7 +276,7 @@ export default function PricingPage() {
       </div>
 
       <p className="mt-8 text-xs text-ink-dim">
-        Demo mode: subscriptions activate instantly without going through a real payment provider.
+        Pay with EcoCash (USD or ZWG). Your subscription starts once the payment is confirmed.
       </p>
     </div>
   );

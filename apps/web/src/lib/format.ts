@@ -1,23 +1,28 @@
+/**
+ * Format minor units for display. Exact (bigint) — no float division — so large
+ * balances and odd amounts never pick up rounding drift. Call only at the leaf.
+ */
 export function formatMoney(amountMinor: number | string | bigint, currency: string): string {
-  const major = Number(BigInt(amountMinor.toString())) / 100;
-  const fmt = (n: number) =>
-    n.toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    });
+  const value = BigInt(amountMinor.toString());
+  const negative = value < 0n;
+  const abs = negative ? -value : value;
+  const whole = (abs / 100n).toLocaleString('en-US');
+  const cents = (abs % 100n).toString().padStart(2, '0');
+  const n = `${whole}.${cents}`;
+  const sign = negative ? '-' : '';
   switch (currency) {
     case 'USD':
-      return `$${fmt(major)}`;
+      return `${sign}$${n}`;
     case 'ZWG':
-      return `ZWG ${fmt(major)}`;
+      return `${sign}ZWG ${n}`;
     case 'ZAR':
-      return `R ${fmt(major)}`;
+      return `${sign}R ${n}`;
     case 'EUR':
-      return `€${fmt(major)}`;
+      return `${sign}€${n}`;
     case 'GBP':
-      return `£${fmt(major)}`;
+      return `${sign}£${n}`;
     default:
-      return `${currency} ${fmt(major)}`;
+      return `${sign}${currency} ${n}`;
   }
 }
 

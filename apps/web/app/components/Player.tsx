@@ -1,21 +1,25 @@
 'use client';
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type Hls from 'hls.js';
 import { api } from '../../src/lib/api';
+import type { CaptionTrack, PlayablePlaylist } from '../../src/types/api';
 
-export interface CaptionTrack {
-  id: string;
-  language: string;
-  label: string;
-  kind: 'subtitles' | 'captions';
-  is_default?: boolean;
-  url: string;
-}
+export type { CaptionTrack };
+
+const HEARTBEAT_MS = 15_000;
 
 interface PlayerProps {
-  src: string;
   videoId: string;
-  sessionId?: string;
+  /** Directly playable URL from GET /videos/:id/playlist (token embedded). */
+  src: string;
+  kind: PlayablePlaylist['kind'];
   captions?: CaptionTrack[];
+  /**
+   * Called when the signed playlist URL has expired mid-session. The parent refetches
+   * /videos/:id/playlist and re-renders the player with the new `src`; resolves to
+   * false if a fresh URL could not be obtained.
+   */
+  onPlaylistExpired?: () => Promise<boolean>;
 }
 
 interface HlsLevel {
@@ -23,11 +27,30 @@ interface HlsLevel {
   bitrate: number;
 }
 
-export default function Player({ src, videoId, captions = [] }: PlayerProps) {
+function isAuthStatus(code: number | undefined): boolean {
+  return code === 401 || code === 403;
+}
+
+export default function Player({
+  videoId,
+  src,
+  kind,
+  captions = [],
+  onPlaylistExpired,
+}: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const hlsRef = useRef<import('hls.js').default | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const sessionIdRef = useRef<string | null>(null);
+  const sessionPromiseRef = useRef<Promise<string | null> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mountedRef = useRef(true);
+  // Source-expiry recovery: one refetch per failure; re-armed once media loads again.
+  const refreshInFlightRef = useRef(false);
+  const refreshArmedRef = useRef(true);
+  const resumeRef = useRef<{ time: number; play: boolean } | null>(null);
+  const onPlaylistExpiredRef = useRef(onPlaylistExpired);
+  onPlaylistExpiredRef.current = onPlaylistExpired;
+
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -37,6 +60,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
   const [levels, setLevels] = useState<HlsLevel[]>([]);
   const [currentLevel, setCurrentLevel] = useState(-1); // -1 = auto
   const [showControls, setShowControls] = useState(true);
+  const [playbackError, setPlaybackError] = useState<string | null>(null);
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const defaultCaption = captions.find((c) => c.is_default)?.id ?? null;
@@ -53,119 +77,197 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
     }
   }
 
-  const startSession = useCallback(async () => {
-    if (sessionIdRef.current) return;
-    try {
-      const res = await api.post<{ id: string }>('/watch/sessions', {
-        video_id: videoId,
-      });
-      sessionIdRef.current = res.id;
-    } catch {
-      // non-fatal — session tracking best-effort
-    }
-  }, [videoId]);
+  // ── Watch session + heartbeats ──────────────────────────────────────────────
 
-  const sendHeartbeat = useCallback(async () => {
-    if (!sessionIdRef.current) return;
-    try {
-      await api.post(`/watch/sessions/${sessionIdRef.current}/heartbeat`);
-    } catch {
-      // ignore
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
     }
   }, []);
 
-  const endSession = useCallback(async () => {
-    if (!sessionIdRef.current) return;
+  const sendHeartbeat = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id) return;
     try {
-      await api.post(`/watch/sessions/${sessionIdRef.current}/end`);
+      await api.post(`/watch/sessions/${id}/heartbeat`);
     } catch {
-      // ignore
+      // best-effort
     }
+  }, []);
+
+  const startHeartbeat = useCallback(() => {
+    // Never stack intervals: always clear before starting.
+    stopHeartbeat();
+    heartbeatRef.current = setInterval(() => void sendHeartbeat(), HEARTBEAT_MS);
+  }, [sendHeartbeat, stopHeartbeat]);
+
+  const ensureSession = useCallback((): Promise<string | null> => {
+    if (sessionIdRef.current) return Promise.resolve(sessionIdRef.current);
+    // De-duplicate concurrent play events so only one session is created.
+    if (!sessionPromiseRef.current) {
+      sessionPromiseRef.current = api
+        .post<{ session_id: string }>('/watch/sessions', { video_id: videoId })
+        .then((res) => {
+          sessionIdRef.current = res.session_id;
+          return res.session_id;
+        })
+        .catch(() => null) // best-effort; playback continues without tracking
+        .finally(() => {
+          sessionPromiseRef.current = null;
+        });
+    }
+    return sessionPromiseRef.current;
+  }, [videoId]);
+
+  const endSession = useCallback(async () => {
+    const id = sessionIdRef.current;
     sessionIdRef.current = null;
+    if (!id) return;
+    try {
+      await api.post(`/watch/sessions/${id}/end`);
+    } catch {
+      // best-effort
+    }
+  }, []);
+
+  // Session lifetime is the component's (per video), independent of source reloads.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      stopHeartbeat();
+      void endSession();
+    };
+  }, [stopHeartbeat, endSession]);
+
+  // ── Source loading ──────────────────────────────────────────────────────────
+
+  const recoverExpiredSource = useCallback(async (): Promise<boolean> => {
+    const video = videoRef.current;
+    const refetch = onPlaylistExpiredRef.current;
+    if (!video || !refetch || refreshInFlightRef.current || !refreshArmedRef.current) {
+      return false;
+    }
+    refreshInFlightRef.current = true;
+    refreshArmedRef.current = false;
+    resumeRef.current = { time: video.currentTime, play: !video.paused };
+    try {
+      return await refetch(); // parent re-renders with a new `src`, which reloads below
+    } finally {
+      refreshInFlightRef.current = false;
+    }
   }, []);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-
     let destroyed = false;
+    setPlaybackError(null);
 
-    async function initPlayer() {
-      if (destroyed || !video) return;
+    function rearm() {
+      refreshArmedRef.current = true;
+    }
 
-      if (typeof window === 'undefined') return;
+    function failExpired(ok: boolean) {
+      if (!ok && !destroyed) setPlaybackError('Playback link expired. Reload the page.');
+    }
 
-      // Progressive formats can be handled natively; everything else is treated as HLS.
-      const isProgressive = /\.(mp4|webm|ogg)(\?|$)/i.test(src);
-      if (isProgressive) {
-        video.src = src;
+    async function init(el: HTMLVideoElement) {
+      if (kind === 'progressive') {
+        el.src = src;
         return;
       }
 
-      // Dynamic import to avoid SSR issues
-      const HlsModule = await import('hls.js');
-      const Hls = HlsModule.default;
-
+      const { default: HlsCtor } = await import('hls.js');
       if (destroyed) return;
 
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-        });
+      if (HlsCtor.isSupported()) {
+        const hls = new HlsCtor({ enableWorker: true, lowLatencyMode: false });
         hlsRef.current = hls;
-        hls.loadSource(src);
-        hls.attachMedia(video);
-
-        hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
-          setLevels(
-            data.levels.map((l) => ({
-              height: l.height,
-              bitrate: l.bitrate,
-            })),
-          );
+        hls.on(HlsCtor.Events.MANIFEST_PARSED, (_event, data) => {
+          setLevels(data.levels.map((l) => ({ height: l.height, bitrate: l.bitrate })));
         });
-
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+        hls.on(HlsCtor.Events.LEVEL_SWITCHED, (_event, data) => {
           setCurrentLevel(data.level);
         });
+        hls.on(HlsCtor.Events.FRAG_LOADED, rearm);
+        hls.on(HlsCtor.Events.ERROR, (_event, data) => {
+          if (!data.fatal) return;
+          if (data.type === HlsCtor.ErrorTypes.NETWORK_ERROR && isAuthStatus(data.response?.code)) {
+            void recoverExpiredSource().then(failExpired);
+            return;
+          }
+          if (data.type === HlsCtor.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+            return;
+          }
+          setPlaybackError('Playback failed. Please try again.');
+        });
+        hls.loadSource(src);
+        hls.attachMedia(el);
+      } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+        // Native HLS (Safari / iOS without MSE).
+        el.src = src;
       } else {
-        // Native HLS on Safari; direct fallback on other browsers.
-        video.src = src;
+        setPlaybackError('Your browser cannot play this video.');
       }
     }
 
-    void initPlayer();
+    // Native playback (progressive or Safari HLS) cannot report HTTP status codes, so a
+    // network error is treated as a possible token expiry and gets the same single refetch.
+    function onNativeError() {
+      if (hlsRef.current || !video) return;
+      if (video.error?.code === MediaError.MEDIA_ERR_NETWORK) {
+        void recoverExpiredSource().then(failExpired);
+      } else if (video.error) {
+        setPlaybackError('Playback failed. Please try again.');
+      }
+    }
+
+    function onLoadedData() {
+      rearm();
+      const resume = resumeRef.current;
+      if (!resume || !video) return;
+      resumeRef.current = null;
+      video.currentTime = resume.time;
+      if (resume.play) void video.play().catch(() => undefined);
+    }
+
+    video.addEventListener('error', onNativeError);
+    video.addEventListener('loadeddata', onLoadedData);
+    void init(video);
 
     return () => {
       destroyed = true;
+      video.removeEventListener('error', onNativeError);
+      video.removeEventListener('loadeddata', onLoadedData);
       hlsRef.current?.destroy();
       hlsRef.current = null;
-      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
-      void endSession();
+      setLevels([]);
+      setCurrentLevel(-1);
     };
-  }, [src, endSession]);
+  }, [src, kind, recoverExpiredSource]);
 
-  function handlePlay() {
-    void startSession();
+  // ── Media element events ────────────────────────────────────────────────────
+
+  async function handlePlay() {
     setPlaying(true);
-    heartbeatRef.current = setInterval(() => void sendHeartbeat(), 15_000);
+    const id = await ensureSession();
+    const video = videoRef.current;
+    // Only tick while actually playing; the user may have paused while we waited.
+    if (!id || !mountedRef.current || !video || video.paused || video.ended) return;
+    startHeartbeat();
   }
 
   function handlePause() {
     setPlaying(false);
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-    }
+    stopHeartbeat();
   }
 
   function handleEnded() {
     setPlaying(false);
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-    }
+    stopHeartbeat();
     void endSession();
   }
 
@@ -259,7 +361,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
       <video
         ref={videoRef}
         className="w-full h-full"
-        onPlay={handlePlay}
+        onPlay={() => void handlePlay()}
         onPause={handlePause}
         onEnded={handleEnded}
         onTimeUpdate={handleTimeUpdate}
@@ -280,6 +382,12 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
           />
         ))}
       </video>
+
+      {playbackError && (
+        <div className="absolute inset-x-0 top-0 m-3 bg-black/80 border border-red-500/40 text-sm text-red-200 rounded-md px-3 py-2 z-10">
+          {playbackError}
+        </div>
+      )}
 
       {/* Controls overlay */}
       <div

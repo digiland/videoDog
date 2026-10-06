@@ -1,7 +1,8 @@
 'use client';
-import { useRef, useState } from 'react';
+import { Suspense, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { setTokens } from '../../../src/lib/auth';
+import { safeReturnTo } from '../../../src/lib/return-to';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
 
@@ -9,9 +10,27 @@ const CODE_LENGTH = 6;
 // One fixed key per OTP slot — the slots are positional and never reorder.
 const SLOT_KEYS = Array.from({ length: CODE_LENGTH }, (_, i) => `otp-slot-${i}`);
 
+// useSearchParams() needs a Suspense boundary so the page can be statically prerendered.
 export default function VerifyPage() {
+  return (
+    <Suspense fallback={<AuthCardFallback />}>
+      <VerifyForm />
+    </Suspense>
+  );
+}
+
+function AuthCardFallback() {
+  return (
+    <div className="min-h-[calc(100vh-56px)] flex items-center justify-center px-6 py-12">
+      <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
+
+function VerifyForm() {
   const searchParams = useSearchParams();
   const phone = searchParams.get('phone') ?? '';
+  const returnTo = safeReturnTo(searchParams.get('return_to'));
   const [digits, setDigits] = useState<string[]>(Array<string>(CODE_LENGTH).fill(''));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,7 +102,7 @@ export default function VerifyPage() {
         refresh_token: string;
       };
       setTokens(data.access_token, data.refresh_token);
-      window.location.assign('/');
+      window.location.assign(returnTo ?? '/');
     } catch {
       setError('Network error. Please try again.');
     } finally {

@@ -32,7 +32,7 @@ export default function VideoCard({ video, index = 0 }: VideoCardProps) {
     >
       <div className="relative aspect-video overflow-hidden bg-surface rounded-md ring-0 group-hover:ring-2 ring-accent transition">
         {video.thumbnail_url ? (
-          // eslint-disable-next-line @next/next/no-img-element
+          // eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature.
           <img
             src={video.thumbnail_url}
             alt={video.title}

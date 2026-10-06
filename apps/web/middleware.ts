@@ -9,7 +9,10 @@ export function middleware(request: NextRequest): NextResponse {
 
   const token = request.cookies.get('access_token')?.value;
   if (!token) {
-    return NextResponse.redirect(new URL('/sign-in', request.url));
+    const signIn = new URL('/sign-in', request.url);
+    // Path + query of this same-origin request; /sign-in re-validates it with safeReturnTo.
+    signIn.searchParams.set('return_to', `${path}${request.nextUrl.search}`);
+    return NextResponse.redirect(signIn);
   }
   return NextResponse.next();
 }

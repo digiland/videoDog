@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../../../src/lib/api';
+import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
 import { isAuthenticated, getUser } from '../../../src/lib/auth';
 import type { Video } from '../../../src/types/api';
 
@@ -59,11 +60,10 @@ export default function UploadPage() {
       setError('Please select a video file.');
       return;
     }
-    if (
-      (accessMode === 'ppv' || accessMode === 'premium_buyable') &&
-      (!ppvPrice || Number.isNaN(Number.parseFloat(ppvPrice)) || Number.parseFloat(ppvPrice) <= 0)
-    ) {
-      setError('Please enter a valid price.');
+    const needsPrice = accessMode === 'ppv' || accessMode === 'premium_buyable';
+    const ppvPriceMinor = needsPrice ? parseMajorToMinor(ppvPrice) : null;
+    if (needsPrice && (ppvPriceMinor === null || ppvPriceMinor <= 0n)) {
+      setError('Please enter a valid price, e.g. 0.50 (max 2 decimal places).');
       return;
     }
 
@@ -75,8 +75,9 @@ export default function UploadPage() {
         description: description.trim() || null,
         access_mode: accessMode,
       };
-      if (accessMode === 'ppv' || accessMode === 'premium_buyable') {
-        body.ppv_price_minor_units = Math.round(Number.parseFloat(ppvPrice) * 100);
+      if (needsPrice && ppvPriceMinor !== null) {
+        // JSON number only at the API boundary; PPV prices are tiny (≤ $2), so lossless.
+        body.ppv_price_minor_units = minorToJsonNumber(ppvPriceMinor);
         body.ppv_price_currency = ppvCurrency;
       }
 
@@ -350,13 +351,12 @@ export default function UploadPage() {
                 <div className="flex gap-3">
                   <input
                     id="upload-ppv-price"
-                    type="number"
+                    type="text"
+                    inputMode="decimal"
+                    autoComplete="off"
                     value={ppvPrice}
                     onChange={(e) => setPpvPrice(e.target.value)}
                     placeholder="0.50"
-                    min="0.10"
-                    max="2.00"
-                    step="0.01"
                     disabled={isLoading}
                     className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-4 py-2.5 flex-1 focus:outline-none focus:border-[#e94560] transition disabled:opacity-50"
                   />

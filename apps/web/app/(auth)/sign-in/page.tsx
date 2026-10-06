@@ -1,11 +1,30 @@
 'use client';
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { Suspense, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { safeReturnTo } from '../../../src/lib/return-to';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
 
+// useSearchParams() needs a Suspense boundary so the page can be statically prerendered.
 export default function SignInPage() {
+  return (
+    <Suspense fallback={<AuthCardFallback />}>
+      <SignInForm />
+    </Suspense>
+  );
+}
+
+function AuthCardFallback() {
+  return (
+    <div className="min-h-[calc(100vh-56px)] flex items-center justify-center px-6 py-12">
+      <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+    </div>
+  );
+}
+
+function SignInForm() {
   const router = useRouter();
+  const returnTo = safeReturnTo(useSearchParams().get('return_to'));
   const [phone, setPhone] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +53,9 @@ export default function SignInPage() {
         setError(body.message ?? 'Failed to send code. Please try again.');
         return;
       }
-      router.push(`/verify?phone=${encodeURIComponent(trimmed)}`);
+      const params = new URLSearchParams({ phone: trimmed });
+      if (returnTo) params.set('return_to', returnTo);
+      router.push(`/verify?${params.toString()}`);
     } catch {
       setError('Network error. Please try again.');
     } finally {

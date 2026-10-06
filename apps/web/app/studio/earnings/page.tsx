@@ -1,6 +1,7 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../../src/lib/api';
+import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
 import type { Earnings, WalletBalance } from '../../../src/types/api';
 import { formatMoney } from '../../../src/lib/format';
 
@@ -53,15 +54,16 @@ export default function EarningsPage() {
       setPayoutError('Please fill in all fields.');
       return;
     }
-    const amountNum = Number.parseFloat(payoutAmount);
-    if (Number.isNaN(amountNum) || amountNum <= 0) {
-      setPayoutError('Enter a valid amount.');
+    const amountMinor = parseMajorToMinor(payoutAmount);
+    if (amountMinor === null || amountMinor <= 0n) {
+      setPayoutError('Enter a valid amount, e.g. 25.00 (max 2 decimal places).');
       return;
     }
     setPayoutLoading(true);
     try {
       await api.post('/wallet/payout', {
-        amount_minor: Math.round(amountNum * 100),
+        // JSON number only at the API boundary; payout amounts are far below 2^53.
+        amount_minor: minorToJsonNumber(amountMinor),
         currency: payoutCurrency,
         msisdn: payoutMsisdn,
         idempotency_key: generateIdempotencyKey(),
@@ -221,12 +223,12 @@ export default function EarningsPage() {
                     </label>
                     <input
                       id="earnings-payout-amount"
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
+                      autoComplete="off"
                       value={payoutAmount}
                       onChange={(e) => setPayoutAmount(e.target.value)}
                       placeholder="5.00"
-                      min="0"
-                      step="0.01"
                       className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-full focus:outline-none focus:border-[#e94560] transition"
                     />
                   </div>

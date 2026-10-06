@@ -1,7 +1,24 @@
 'use client';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import type { PaywallPayload } from '../../src/types/api';
+import type { MoneyDTO, PaywallPayload } from '../../src/types/api';
 import { formatMoney } from '../../src/lib/format';
+import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
+import { signInHref } from '../../src/lib/return-to';
+
+/**
+ * Render-only approximation in the viewer's display currency (CLAUDE.md §3.5). Shown only
+ * when it differs from the currency actually charged; never used for any calculation.
+ */
+function ApproxPrice({ price, display }: { price: MoneyDTO; display?: MoneyDTO }) {
+  if (!display || display.currency === price.currency) return null;
+  return (
+    <span className="block text-xs text-gray-400" title="Approximate conversion for reference">
+      ≈ {formatMoney(display.amount_minor, display.currency)}{' '}
+      <span className="text-gray-500">(approx.)</span>
+    </span>
+  );
+}
 
 interface PaywallProps {
   payload: PaywallPayload;
@@ -11,6 +28,11 @@ interface PaywallProps {
 export default function Paywall({ payload, videoId }: PaywallProps) {
   const hasBuy = Boolean(payload.options.buy);
   const hasSubscribe = Boolean(payload.options.subscribe?.plans.length);
+  // Read auth on the client only (cookies), after mount, to avoid hydration mismatches.
+  const [signedIn, setSignedIn] = useState(true);
+  useEffect(() => {
+    setSignedIn(isAuthenticated() || Boolean(getRefreshToken()));
+  }, []);
 
   return (
     <div className="bg-[#16213e] rounded-xl border border-[#e94560]/20 p-6 text-center">
@@ -52,11 +74,17 @@ export default function Paywall({ payload, videoId }: PaywallProps) {
             <div className="text-xs font-semibold text-yellow-400 uppercase tracking-wider mb-2">
               One-time unlock
             </div>
-            <div className="text-3xl font-bold text-white mb-4">
-              {formatMoney(
-                payload.options.buy.price.amount_minor,
-                payload.options.buy.price.currency,
-              )}
+            <div className="mb-4">
+              <span className="block text-3xl font-bold text-white">
+                {formatMoney(
+                  payload.options.buy.price.amount_minor,
+                  payload.options.buy.price.currency,
+                )}
+              </span>
+              <ApproxPrice
+                price={payload.options.buy.price}
+                display={payload.options.buy.display_price}
+              />
             </div>
             <p className="text-xs text-gray-500 mb-4">Pay once, watch forever</p>
             <Link
@@ -76,17 +104,20 @@ export default function Paywall({ payload, videoId }: PaywallProps) {
             </div>
             <div className="space-y-2 mb-4">
               {payload.options.subscribe.plans.map((plan) => (
-                <div key={plan.id} className="flex items-center justify-between text-sm">
+                <div key={plan.id} className="flex items-start justify-between gap-3 text-sm">
                   <span className="text-gray-300 capitalize">{plan.code.replace(/_/g, ' ')}</span>
-                  <span className="font-semibold text-white">
-                    {formatMoney(plan.display_price.amount_minor, plan.display_price.currency)}
+                  <span className="text-right">
+                    <span className="block font-semibold text-white">
+                      {formatMoney(plan.price.amount_minor, plan.price.currency)}
+                    </span>
+                    <ApproxPrice price={plan.price} display={plan.display_price} />
                   </span>
                 </div>
               ))}
             </div>
             <p className="text-xs text-gray-500 mb-4">Access all premium content</p>
             <Link
-              href="/subscriptions"
+              href={`/pricing?return_to=${encodeURIComponent(`/v/${videoId}`)}`}
               className="block w-full bg-purple-600 hover:bg-purple-500 text-white font-semibold py-3 px-4 rounded-lg transition text-sm"
             >
               Subscribe now
@@ -95,12 +126,14 @@ export default function Paywall({ payload, videoId }: PaywallProps) {
         )}
       </div>
 
-      <p className="mt-4 text-xs text-gray-600">
-        <Link href="/sign-in" className="text-[#e94560] hover:underline">
-          Sign in
-        </Link>{' '}
-        if you already have access.
-      </p>
+      {!signedIn && (
+        <p className="mt-4 text-xs text-gray-600">
+          <Link href={signInHref(`/v/${videoId}`)} className="text-[#e94560] hover:underline">
+            Sign in
+          </Link>{' '}
+          if you already have access.
+        </p>
+      )}
     </div>
   );
 }

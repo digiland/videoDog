@@ -2,6 +2,11 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { api } from '../../../src/lib/api';
+import {
+  formatMinorToMajorInput,
+  minorToJsonNumber,
+  parseMajorToMinor,
+} from '../../../src/lib/money-input';
 import type { Video } from '../../../src/types/api';
 import { formatDuration, formatMoney } from '../../../src/lib/format';
 
@@ -89,7 +94,7 @@ export default function StudioVideosPage() {
       description: video.description ?? '',
       access_mode: video.access_mode,
       ppv_price: video.ppv_price_minor_units
-        ? String(Number(video.ppv_price_minor_units) / 100)
+        ? formatMinorToMajorInput(video.ppv_price_minor_units)
         : '',
       ppv_currency: video.ppv_price_currency ?? 'USD',
       comments_enabled: video.comments_enabled !== false,
@@ -119,7 +124,12 @@ export default function StudioVideosPage() {
         comments_enabled: editForm.comments_enabled,
       };
       if (editForm.access_mode === 'ppv' || editForm.access_mode === 'premium_buyable') {
-        body.ppv_price_minor_units = Math.round(Number.parseFloat(editForm.ppv_price) * 100);
+        const priceMinor = parseMajorToMinor(editForm.ppv_price);
+        if (priceMinor === null || priceMinor <= 0n) {
+          throw new Error('Enter a valid price, e.g. 0.50 (max 2 decimal places).');
+        }
+        // JSON number only at the API boundary; PPV prices are tiny (≤ $2), so lossless.
+        body.ppv_price_minor_units = minorToJsonNumber(priceMinor);
         body.ppv_price_currency = editForm.ppv_currency;
       }
       await api.patch(`/videos/${id}`, body);
@@ -206,7 +216,9 @@ export default function StudioVideosPage() {
                       editForm.access_mode === 'premium_buyable') && (
                       <>
                         <input
-                          type="number"
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
                           value={editForm.ppv_price}
                           onChange={(e) =>
                             setEditForm((f) => ({
@@ -215,8 +227,6 @@ export default function StudioVideosPage() {
                             }))
                           }
                           placeholder="Price"
-                          min="0"
-                          step="0.01"
                           className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-28 focus:outline-none focus:border-[#e94560] transition"
                         />
                         <select
@@ -286,7 +296,7 @@ export default function StudioVideosPage() {
                   {/* Thumbnail */}
                   <div className="w-16 h-10 rounded bg-gray-800 shrink-0 overflow-hidden">
                     {video.thumbnail_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
+                      // eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature.
                       <img
                         src={video.thumbnail_url}
                         alt=""

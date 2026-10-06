@@ -4,6 +4,8 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '../../../src/lib/api';
 import { isAuthenticated } from '../../../src/lib/auth';
+import { formatMoney } from '../../../src/lib/format';
+import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
 
 interface Balance {
   currency: string;
@@ -13,17 +15,11 @@ interface Balance {
 type PayoutCurrency = 'USD' | 'ZWG' | 'ZAR';
 
 const CURRENCIES: readonly PayoutCurrency[] = ['USD', 'ZWG', 'ZAR'];
-const MIN_PAYOUT: Record<PayoutCurrency, { minor: number; display: string }> = {
-  USD: { minor: 500, display: '$5.00' },
-  ZWG: { minor: 15000, display: 'ZWG 150' },
-  ZAR: { minor: 10000, display: 'R 100' },
+const MIN_PAYOUT: Record<PayoutCurrency, { minor: bigint; display: string }> = {
+  USD: { minor: 500n, display: '$5.00' },
+  ZWG: { minor: 15000n, display: 'ZWG 150' },
+  ZAR: { minor: 10000n, display: 'R 100' },
 };
-
-function formatMoney(minor: string | number, currency: string) {
-  const n = Number(minor) / 100;
-  const sym = currency === 'USD' ? '$' : currency === 'ZAR' ? 'R ' : `${currency} `;
-  return `${sym}${n.toFixed(2)}`;
-}
 
 export default function PayoutsPage() {
   const router = useRouter();
@@ -65,7 +61,7 @@ export default function PayoutsPage() {
   const usdBalance = balances?.find((b) => b.currency === 'USD');
   const balanceMinor = usdBalance ? BigInt(usdBalance.balance_minor) : 0n;
   const min = MIN_PAYOUT[currency];
-  const requestedMinor = Math.round((Number.parseFloat(amount) || 0) * 100);
+  const requestedMinor = parseMajorToMinor(amount);
 
   async function handleRequest(e: React.FormEvent) {
     e.preventDefault();
@@ -79,7 +75,12 @@ export default function PayoutsPage() {
         });
         setSavedMsisdn(me.payout_msisdn);
       }
-      await api.post('/wallet/payout', { amount_minor: requestedMinor, currency });
+      if (requestedMinor === null) throw new Error('Enter a valid amount.');
+      // JSON number only at the API boundary; payout amounts are far below 2^53.
+      await api.post('/wallet/payout', {
+        amount_minor: minorToJsonNumber(requestedMinor),
+        currency,
+      });
       setSuccess('Payout requested. You will be notified when it processes.');
       setAmount('');
       await load();
@@ -91,8 +92,9 @@ export default function PayoutsPage() {
   }
 
   const canSubmit =
+    requestedMinor !== null &&
     requestedMinor >= min.minor &&
-    (currency !== 'USD' || BigInt(requestedMinor) <= balanceMinor) &&
+    (currency !== 'USD' || requestedMinor <= balanceMinor) &&
     (savedMsisdn !== null || /^\+[1-9]\d{7,14}$/.test(msisdn.trim()));
 
   return (
@@ -153,9 +155,9 @@ export default function PayoutsPage() {
             </label>
             <input
               id="payout-amount"
-              type="number"
-              step="0.01"
-              min="0"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
               placeholder="0.00"
