@@ -29,7 +29,7 @@ export function Field({ label, hint, error, prefix, id, className, ...input }: F
           id={inputId}
           aria-invalid={error ? true : undefined}
           aria-describedby={hint || error ? describedBy : undefined}
-          className="flex-1 min-w-0 bg-transparent text-base text-ink placeholder:text-ink-3 outline-none num"
+          className="flex-1 min-w-0 bg-transparent text-base text-ink placeholder:text-ink-3 outline-none focus-visible:outline-none num"
           {...input}
         />
       </div>

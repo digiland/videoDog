@@ -3,7 +3,7 @@ import { JwtGuard } from '../auth/jwt.guard';
 import { RequireAuthGuard } from '../auth/require-auth.guard';
 import type { AuthenticatedRequest } from '../auth/jwt.guard';
 import { SubscriptionsService } from './subscriptions.service';
-import type { CurrencyCode } from '@streamzw/shared';
+import { isCurrencyCode } from '@streamzw/shared';
 
 @Controller('subscriptions')
 @UseGuards(JwtGuard)
@@ -12,8 +12,7 @@ export class SubscriptionsController {
 
   @Get('plans')
   async getPlans(@Query('currency') currency?: string) {
-    const displayCurrency = (currency as CurrencyCode | undefined) ?? 'USD';
-    return this.subs.getPlans(displayCurrency);
+    return this.subs.getPlans(isCurrencyCode(currency) ? currency : 'USD');
   }
 
   @Post()
@@ -25,7 +24,21 @@ export class SubscriptionsController {
   @Get('me')
   @UseGuards(RequireAuthGuard)
   async current(@Req() req: AuthenticatedRequest) {
-    return this.subs.getCurrent(req.user.id);
+    const sub = await this.subs.getCurrent(req.user.id);
+    // Same snake_case shape as every other endpoint; empty body when there is none.
+    return sub
+      ? {
+          id: sub.id,
+          plan_id: sub.planId,
+          state: sub.state,
+          charged_amount_minor: sub.chargedAmountMinor,
+          charged_currency: sub.chargedCurrency,
+          started_at: sub.startedAt,
+          expires_at: sub.expiresAt,
+          auto_renew: sub.autoRenew,
+          cancelled_at: sub.cancelledAt,
+        }
+      : null;
   }
 
   @Post('me/cancel')

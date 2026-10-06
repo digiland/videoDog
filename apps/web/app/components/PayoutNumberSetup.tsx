@@ -3,6 +3,10 @@ import { useState } from 'react';
 import { api } from '../../src/lib/api';
 import { isE164, normaliseMsisdn } from '../../src/lib/payments';
 import type { User } from '../../src/types/api';
+import { Button } from '../../src/ui/button';
+import { Field } from '../../src/ui/field';
+import { Icon } from '../../src/ui/icon';
+import { Notice } from '../../src/ui/notice';
 
 interface Props {
   /** The account's own phone (E.164): the OTP that authorises the change goes here. */
@@ -12,6 +16,12 @@ interface Props {
 }
 
 type Step = { name: 'view' } | { name: 'enter' } | { name: 'code'; msisdn: string };
+
+/** "+263 77 100 0002": easier to check digit groups than a raw E.164 string. */
+function pretty(e164: string): string {
+  const m = /^\+263(\d{2})(\d{3})(\d{4})$/.exec(e164);
+  return m ? `+263 ${m[1]} ${m[2]} ${m[3]}` : e164;
+}
 
 /**
  * Set / change the payout EcoCash number. The API only accepts the change with a one-time
@@ -34,7 +44,7 @@ export default function PayoutNumberSetup({ accountPhone, savedMsisdn, onSaved }
     setError(null);
     const number = normaliseMsisdn(msisdn.trim());
     if (!isE164(number)) {
-      setError('Enter the EcoCash number in international format, e.g. +263771234567.');
+      setError('Enter the EcoCash number with the country code, e.g. +263771234567.');
       return;
     }
     setBusy(true);
@@ -86,131 +96,106 @@ export default function PayoutNumberSetup({ accountPhone, savedMsisdn, onSaved }
     }
   }
 
-  const inputClass =
-    'w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2 placeholder:text-ink-dim focus:outline-none transition font-mono';
-  const primaryBtn =
-    'bg-accent hover:bg-accent-hot text-bg font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50';
-  const secondaryBtn =
-    'bg-surface hover:bg-surface-2 border border-line font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50';
-
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       {step.name === 'view' && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm">
-            Payouts go to EcoCash <span className="font-mono">{savedMsisdn ?? 'not set'}</span>
-          </p>
-          <button
-            type="button"
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-2 text-ink-2">
+              <Icon name="phone" size={20} />
+            </span>
+            <div className="min-w-0">
+              <p className="text-xs text-ink-3">EcoCash</p>
+              <p className="num text-base font-semibold text-ink">
+                {savedMsisdn ? pretty(savedMsisdn) : 'Not set'}
+              </p>
+            </div>
+          </div>
+          <Button
+            variant="secondary"
             onClick={() => {
               setError(null);
               setStep({ name: 'enter' });
             }}
-            className={secondaryBtn}
           >
-            {savedMsisdn ? 'Change payout number' : 'Set payout number'}
-          </button>
+            {savedMsisdn ? 'Change' : 'Set number'}
+          </Button>
         </div>
       )}
 
       {step.name === 'enter' && (
-        <form onSubmit={(e) => void handleSendCode(e)} className="space-y-3">
-          <div>
-            <label htmlFor="payout-msisdn" className="block text-sm font-medium mb-1.5">
-              {savedMsisdn ? 'New payout EcoCash number' : 'Payout EcoCash number'}
-            </label>
-            <input
-              id="payout-msisdn"
-              type="tel"
-              inputMode="tel"
-              autoComplete="tel"
-              value={msisdn}
-              onChange={(e) => {
-                setMsisdn(e.target.value);
-                setError(null);
-              }}
-              placeholder="+263771234567"
-              disabled={busy}
-              className={inputClass}
-            />
-            <p className="mt-1 text-xs text-ink-dim">
-              To confirm it&rsquo;s you, we&rsquo;ll send a code to your account phone{' '}
-              <span className="font-mono">{accountPhone}</span>.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button type="submit" disabled={busy} className={primaryBtn}>
-              {busy ? 'Sending…' : 'Send code'}
-            </button>
+        <form onSubmit={(e) => void handleSendCode(e)} className="flex flex-col gap-3">
+          <Field
+            id="payout-msisdn"
+            label={savedMsisdn ? 'New EcoCash number' : 'EcoCash number for payouts'}
+            type="tel"
+            inputMode="tel"
+            autoComplete="tel"
+            value={msisdn}
+            onChange={(e) => {
+              setMsisdn(e.target.value);
+              setError(null);
+            }}
+            placeholder="+263771234567"
+            disabled={busy}
+            hint={
+              <>
+                To confirm it&rsquo;s you, we&rsquo;ll send a code to your account phone{' '}
+                <span className="num">{pretty(accountPhone)}</span>.
+              </>
+            }
+          />
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button type="submit" loading={busy}>
+              Send code
+            </Button>
             {savedMsisdn && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => setStep({ name: 'view' })}
-                className={secondaryBtn}
-              >
+              <Button variant="ghost" disabled={busy} onClick={() => setStep({ name: 'view' })}>
                 Cancel
-              </button>
+              </Button>
             )}
           </div>
         </form>
       )}
 
       {step.name === 'code' && (
-        <form onSubmit={(e) => void handleSave(e, step.msisdn)} className="space-y-3">
-          <p className="text-sm text-ink-mute">
-            Enter the 6-digit code sent to <span className="font-mono">{accountPhone}</span> to set{' '}
-            <span className="font-mono text-ink">{step.msisdn}</span> as your payout number.
+        <form onSubmit={(e) => void handleSave(e, step.msisdn)} className="flex flex-col gap-3">
+          <p className="text-sm text-ink-2">
+            Enter the 6-digit code sent to{' '}
+            <span className="num text-ink">{pretty(accountPhone)}</span> to make{' '}
+            <span className="num font-semibold text-ink">{pretty(step.msisdn)}</span> your payout
+            number.
           </p>
-          <div>
-            <label htmlFor="payout-otp" className="block text-sm font-medium mb-1.5">
-              Code
-            </label>
-            <input
-              id="payout-otp"
-              type="text"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              maxLength={6}
-              value={code}
-              onChange={(e) => {
-                setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
-                setError(null);
-              }}
-              placeholder="123456"
-              disabled={busy}
-              className={`${inputClass} tracking-widest`}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button type="submit" disabled={busy || code.length !== 6} className={primaryBtn}>
-              {busy ? 'Saving…' : 'Save payout number'}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => setStep({ name: 'enter' })}
-              className={secondaryBtn}
-            >
+          <Field
+            id="payout-otp"
+            label="Code"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            maxLength={6}
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value.replace(/\D/g, '').slice(0, 6));
+              setError(null);
+            }}
+            placeholder="123456"
+            disabled={busy}
+            className="max-w-48 [&_input]:tracking-widest"
+          />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <Button type="submit" loading={busy} disabled={code.length !== 6}>
+              Save payout number
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={() => setStep({ name: 'enter' })}>
               Back
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => void handleResend()}
-              className="text-xs text-ink-dim hover:text-accent transition disabled:opacity-50"
-            >
-              {resent ? 'Code resent' : 'Resend code'}
-            </button>
+            </Button>
+            <Button variant="ghost" disabled={busy} onClick={() => void handleResend()}>
+              {resent ? 'Code sent again' : 'Resend code'}
+            </Button>
           </div>
         </form>
       )}
 
-      {error && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-          {error}
-        </div>
-      )}
+      {error && <Notice tone="error">{error}</Notice>}
     </div>
   );
 }

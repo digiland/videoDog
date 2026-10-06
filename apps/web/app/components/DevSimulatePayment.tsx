@@ -1,6 +1,7 @@
 'use client';
 import { useState } from 'react';
 import { api } from '../../src/lib/api';
+import { Button } from '../../src/ui/button';
 
 /** Inlined at build time; the API also refuses simulate unless DEV_SIMULATE_PAYMENTS=true. */
 const ENABLED = process.env.NEXT_PUBLIC_DEV_SIMULATE_PAYMENTS === 'true';
@@ -13,12 +14,12 @@ export default function DevSimulatePayment({
   paymentId: string;
   onSimulated: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<'completed' | 'failed' | null>(null);
   const [error, setError] = useState<string | null>(null);
   if (!ENABLED) return null;
 
   async function simulate(status: 'completed' | 'failed') {
-    setBusy(true);
+    setBusy(status);
     setError(null);
     try {
       await api.post(`/dev/payments/${encodeURIComponent(paymentId)}/simulate`, { status });
@@ -26,32 +27,38 @@ export default function DevSimulatePayment({
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Simulate failed');
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
   return (
-    <div className="border border-dashed border-warn/50 rounded-md px-3 py-2 text-xs space-y-2">
-      <p className="text-warn font-semibold uppercase tracking-wide">Dev only</p>
+    <div className="flex flex-col gap-2 rounded border border-dashed border-line px-3 py-2">
+      <p className="text-xs font-semibold text-gold">Dev only: no real provider</p>
       <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          disabled={busy}
+        <Button
+          variant="secondary"
+          size="sm"
+          loading={busy === 'completed'}
+          disabled={busy !== null}
           onClick={() => void simulate('completed')}
-          className="px-2 py-1 rounded bg-surface hover:bg-surface-2 border border-line disabled:opacity-50"
         >
           Simulate success
-        </button>
-        <button
-          type="button"
-          disabled={busy}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          loading={busy === 'failed'}
+          disabled={busy !== null}
           onClick={() => void simulate('failed')}
-          className="px-2 py-1 rounded bg-surface hover:bg-surface-2 border border-line disabled:opacity-50"
         >
           Simulate failure
-        </button>
+        </Button>
       </div>
-      {error && <p className="text-red-300">{error}</p>}
+      {error && (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

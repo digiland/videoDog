@@ -1,393 +1,408 @@
 'use client';
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../../src/lib/api';
-import {
-  formatMinorToMajorInput,
-  minorToJsonNumber,
-  parseMajorToMinor,
-} from '../../../src/lib/money-input';
+import { formatDuration } from '../../../src/lib/format';
+import { formatMinorToMajorInput, minorToJsonNumber } from '../../../src/lib/money-input';
 import type { Video } from '../../../src/types/api';
-import { formatDuration, formatMoney } from '../../../src/lib/format';
+import { AccessChip } from '../../../src/ui/access-chip';
+import { Button, LinkButton } from '../../../src/ui/button';
+import { Field } from '../../../src/ui/field';
+import { Icon } from '../../../src/ui/icon';
+import { Notice } from '../../../src/ui/notice';
+import { EmptyState, Skeleton } from '../../../src/ui/state';
+import { AccessModePicker } from '../_components/AccessModePicker';
+import {
+  type AccessMode,
+  errorMessage,
+  fetchMe,
+  fetchMyVideos,
+  needsPrice,
+  parsePpvPrice,
+  shortDate,
+} from '../_components/studio-data';
+import { PageTitle, StateChip, VideoThumb } from '../_components/ui';
 
-const STATE_COLORS: Record<Video['state'], string> = {
-  uploading: 'bg-blue-900/60 text-blue-300',
-  processing: 'bg-yellow-900/60 text-yellow-300',
-  ready: 'bg-green-900/60 text-green-300',
-  published: 'bg-emerald-900/60 text-emerald-300',
-  unpublished: 'bg-gray-900/60 text-gray-400',
-  failed: 'bg-red-900/60 text-red-300',
-};
+type Edit = { title: string; mode: AccessMode; price: string; thumb: File | null };
+
+function priceOf(v: Video) {
+  return v.ppv_price_minor_units && v.ppv_price_currency
+    ? { amount_minor: v.ppv_price_minor_units, currency: v.ppv_price_currency }
+    : null;
+}
 
 export default function StudioVideosPage() {
-  const [videos, setVideos] = useState<Video[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
-  const [editForm, setEditForm] = useState<{
-    title: string;
-    description: string;
-    access_mode: Video['access_mode'];
-    ppv_price: string;
-    ppv_currency: string;
-    comments_enabled: boolean;
-  }>({
-    title: '',
-    description: '',
-    access_mode: 'free',
-    ppv_price: '',
-    ppv_currency: 'USD',
-    comments_enabled: true,
-  });
+  const [videos, setVideos] = useState<Video[] | null>(null);
+  const [currency, setCurrency] = useState('USD');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
-  useEffect(() => {
-    void loadVideos();
+  const load = useCallback(async () => {
+    try {
+      const page = await fetchMyVideos(100);
+      setVideos(page.items);
+      setError(null);
+    } catch (err) {
+      setError(errorMessage(err, 'Network error'));
+      setVideos((v) => v ?? []);
+    }
   }, []);
 
-  async function loadVideos() {
-    setLoading(true);
-    try {
-      const data = await api.get<{ items: Video[]; next_cursor: string | null } | Video[]>(
-        '/videos?creator=me&limit=50',
-      );
-      if (Array.isArray(data)) {
-        setVideos(data);
-      } else {
-        setVideos(data.items);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }
+  useEffect(() => {
+    void load();
+    fetchMe()
+      .then((me) => setCurrency(me.canonical_pricing_currency ?? 'USD'))
+      .catch(() => undefined);
+  }, [load]);
 
-  async function handlePublish(id: string) {
-    setActionLoading(id);
+  async function publish(id: string) {
+    setBusy(id);
     try {
       await api.post(`/videos/${id}/publish`);
-      await loadVideos();
-    } catch {
-      // ignore
+      await load();
+    } catch (err) {
+      setError(`Couldn't publish: ${errorMessage(err, 'try again')}.`);
     } finally {
-      setActionLoading(null);
+      setBusy(null);
     }
   }
 
-  async function handleUnpublish(id: string) {
-    setActionLoading(id);
-    try {
-      await api.post(`/videos/${id}/unpublish`);
-      await loadVideos();
-    } catch {
-      // ignore
-    } finally {
-      setActionLoading(null);
+  const rowProps = (v: Video) => ({
+    video: v,
+    busy: busy === v.id,
+    editing: editing === v.id,
+    onPublish: () => void publish(v.id),
+    onEdit: () => setEditing(editing === v.id ? null : v.id),
+  });
+
+  const editor = (v: Video) => (
+    <EditPanel
+      video={v}
+      currency={currency}
+      onClose={() => setEditing(null)}
+      onSaved={async () => {
+        setEditing(null);
+        await load();
+      }}
+    />
+  );
+
+  return (
+    <div className="flex flex-col gap-6">
+      <PageTitle
+        title="Videos"
+        action={
+          <LinkButton href="/studio/upload" icon="upload" className="hidden sm:inline-flex">
+            Upload video
+          </LinkButton>
+        }
+      >
+        Publish, change prices and add captions.
+      </PageTitle>
+
+      {error && <Notice tone="error">{error}</Notice>}
+
+      {videos === null ? (
+        <div className="flex flex-col gap-2">
+          {[0, 1, 2, 3].map((i) => (
+            <Skeleton key={i} className="h-20" />
+          ))}
+        </div>
+      ) : videos.length === 0 ? (
+        <div className="rounded border border-line bg-surface">
+          <EmptyState
+            title="No videos yet"
+            action={
+              <LinkButton href="/studio/upload" icon="upload">
+                Upload your first video
+              </LinkButton>
+            }
+          >
+            Your uploads show here with what to do next.
+          </EmptyState>
+        </div>
+      ) : (
+        <>
+          {/* Phones: cards */}
+          <ul className="flex flex-col gap-3 md:hidden">
+            {videos.map((v) => (
+              <li key={v.id} className="rounded border border-line bg-surface">
+                <VideoCardRow {...rowProps(v)} />
+                {editing === v.id && <div className="border-t border-line p-4">{editor(v)}</div>}
+              </li>
+            ))}
+          </ul>
+
+          {/* Wide screens: a table in its own scroll container */}
+          <div className="hidden overflow-x-auto rounded border border-line md:block">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="bg-surface text-xs text-ink-3">
+                <tr>
+                  <th scope="col" className="px-3 py-2.5 font-semibold">
+                    Video
+                  </th>
+                  <th scope="col" className="px-3 py-2.5 font-semibold">
+                    State
+                  </th>
+                  <th scope="col" className="px-3 py-2.5 font-semibold">
+                    Access
+                  </th>
+                  <th scope="col" className="px-3 py-2.5 font-semibold text-right">
+                    Length
+                  </th>
+                  <th scope="col" className="px-3 py-2.5 font-semibold">
+                    Date
+                  </th>
+                  <th scope="col" className="px-3 py-2.5 font-semibold text-right">
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line">
+                {videos.map((v) => (
+                  <TableRows key={v.id} {...rowProps(v)} editor={editor(v)} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+type RowProps = {
+  video: Video;
+  busy: boolean;
+  editing: boolean;
+  onPublish: () => void;
+  onEdit: () => void;
+};
+
+function Actions({ video, busy, editing, onPublish, onEdit }: RowProps) {
+  const canPublish = video.state === 'ready' || video.state === 'unpublished';
+  return (
+    <div className="flex flex-wrap items-center gap-2 md:justify-end">
+      {canPublish && (
+        <Button onClick={onPublish} loading={busy} className="flex-1 md:flex-none">
+          Publish
+        </Button>
+      )}
+      {video.state === 'failed' && (
+        <LinkButton href="/studio/upload" variant="secondary" className="flex-1 md:flex-none">
+          Upload again
+        </LinkButton>
+      )}
+      <Button
+        variant="secondary"
+        onClick={onEdit}
+        aria-expanded={editing}
+        className="flex-1 md:flex-none"
+      >
+        {editing ? 'Close' : 'Edit'}
+      </Button>
+      <LinkButton
+        href={`/studio/videos/${video.id}/captions`}
+        variant="ghost"
+        icon="captions"
+        className="flex-1 md:flex-none"
+      >
+        Captions
+      </LinkButton>
+    </div>
+  );
+}
+
+function Meta({ video }: { video: Video }) {
+  return (
+    <span className="num text-xs text-ink-3">
+      {video.duration_seconds != null && `${formatDuration(video.duration_seconds)} · `}
+      {shortDate(video.published_at ?? video.created_at)}
+    </span>
+  );
+}
+
+function VideoCardRow(props: RowProps) {
+  const { video } = props;
+  return (
+    <div className="flex flex-col gap-3 p-3">
+      <div className="flex gap-3">
+        <VideoThumb src={video.thumbnail_url} className="w-28" />
+        <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+          <p className="line-clamp-2 text-sm font-semibold text-ink">{video.title}</p>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StateChip state={video.state} />
+            <AccessChip mode={video.access_mode} price={priceOf(video)} />
+          </div>
+          <Meta video={video} />
+        </div>
+      </div>
+      <Actions {...props} />
+    </div>
+  );
+}
+
+function TableRows(props: RowProps & { editor: React.ReactNode }) {
+  const { video, editing, editor } = props;
+  return (
+    <>
+      <tr className="bg-bg">
+        <td className="px-3 py-2.5">
+          <div className="flex items-center gap-3">
+            <VideoThumb src={video.thumbnail_url} className="w-24" />
+            {video.state === 'published' ? (
+              <Link
+                href={`/v/${video.id}`}
+                className="line-clamp-2 max-w-xs font-semibold text-ink hover:text-accent"
+              >
+                {video.title}
+              </Link>
+            ) : (
+              <span className="line-clamp-2 max-w-xs font-semibold text-ink">{video.title}</span>
+            )}
+          </div>
+        </td>
+        <td className="px-3 py-2.5">
+          <StateChip state={video.state} />
+        </td>
+        <td className="px-3 py-2.5">
+          <AccessChip mode={video.access_mode} price={priceOf(video)} />
+        </td>
+        <td className="num px-3 py-2.5 text-right text-ink-2">
+          {video.duration_seconds != null ? formatDuration(video.duration_seconds) : '—'}
+        </td>
+        <td className="num whitespace-nowrap px-3 py-2.5 text-ink-2">
+          {shortDate(video.published_at ?? video.created_at)}
+        </td>
+        <td className="px-3 py-2.5">
+          <Actions {...props} />
+        </td>
+      </tr>
+      {editing && (
+        <tr className="bg-surface">
+          <td colSpan={6} className="p-4">
+            {editor}
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function EditPanel({
+  video,
+  currency,
+  onClose,
+  onSaved,
+}: {
+  video: Video;
+  currency: string;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
+  const [edit, setEdit] = useState<Edit>({
+    title: video.title,
+    mode: video.access_mode,
+    price: video.ppv_price_minor_units ? formatMinorToMajorInput(video.ppv_price_minor_units) : '',
+    thumb: null,
+  });
+  const [priceError, setPriceError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const title = edit.title.trim();
+    if (!title) return setError('Give the video a title.');
+    const body: Record<string, unknown> = {
+      title,
+      access_mode: edit.mode,
+      ppv_price_minor_units: null,
+      ppv_price_currency: null,
+    };
+    if (needsPrice(edit.mode)) {
+      const p = parsePpvPrice(edit.price, currency);
+      if (!p.ok) return setPriceError(p.error);
+      // JSON number only at the API boundary; PPV prices are ≤ 200 minor units.
+      body.ppv_price_minor_units = minorToJsonNumber(p.minor);
+      body.ppv_price_currency = currency;
     }
-  }
-
-  function startEdit(video: Video) {
-    setEditingId(video.id);
-    setEditForm({
-      title: video.title,
-      description: video.description ?? '',
-      access_mode: video.access_mode,
-      ppv_price: video.ppv_price_minor_units
-        ? formatMinorToMajorInput(video.ppv_price_minor_units)
-        : '',
-      ppv_currency: video.ppv_price_currency ?? 'USD',
-      comments_enabled: video.comments_enabled !== false,
-    });
-  }
-
-  async function handleSaveEdit(id: string) {
-    setActionLoading(id);
+    setSaving(true);
     try {
-      if (thumbnailFile) {
+      if (edit.thumb) {
         const { upload_url, key } = await api.post<{ upload_url: string; key: string }>(
-          `/videos/${id}/thumbnail`,
+          `/videos/${video.id}/thumbnail`,
         );
         const put = await fetch(upload_url, {
           method: 'PUT',
-          headers: { 'content-type': thumbnailFile.type },
-          body: thumbnailFile,
+          headers: { 'content-type': edit.thumb.type },
+          body: edit.thumb,
         });
         if (!put.ok) throw new Error('Thumbnail upload failed');
-        await api.post(`/videos/${id}/thumbnail/complete`, { key });
+        await api.post(`/videos/${video.id}/thumbnail/complete`, { key });
       }
-
-      const body: Record<string, unknown> = {
-        title: editForm.title,
-        description: editForm.description || null,
-        access_mode: editForm.access_mode,
-        comments_enabled: editForm.comments_enabled,
-      };
-      if (editForm.access_mode === 'ppv' || editForm.access_mode === 'premium_buyable') {
-        const priceMinor = parseMajorToMinor(editForm.ppv_price);
-        if (priceMinor === null || priceMinor <= 0n) {
-          throw new Error('Enter a valid price, e.g. 0.50 (max 2 decimal places).');
-        }
-        // JSON number only at the API boundary; PPV prices are tiny (≤ $2), so lossless.
-        body.ppv_price_minor_units = minorToJsonNumber(priceMinor);
-        body.ppv_price_currency = editForm.ppv_currency;
-      }
-      await api.patch(`/videos/${id}`, body);
-      setEditingId(null);
-      setThumbnailFile(null);
-      await loadVideos();
-    } catch (err: unknown) {
-      alert((err instanceof Error && err.message) || 'Failed to save changes');
+      await api.patch(`/videos/${video.id}`, body);
+      await onSaved();
+    } catch (err) {
+      setError(`Not saved: ${errorMessage(err, 'try again')}.`);
     } finally {
-      setActionLoading(null);
+      setSaving(false);
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="w-8 h-8 border-2 border-[#e94560] border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
-
   return (
-    <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-white">My Videos</h1>
-        <a
-          href="/studio/upload"
-          className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2 px-4 rounded-lg transition text-sm"
-        >
-          Upload new
-        </a>
+    <form onSubmit={(e) => void save(e)} className="flex max-w-2xl flex-col gap-4">
+      <Field
+        label="Title"
+        value={edit.title}
+        maxLength={255}
+        onChange={(e) => setEdit((s) => ({ ...s, title: e.target.value }))}
+      />
+      <AccessModePicker
+        idPrefix={`edit-${video.id}`}
+        mode={edit.mode}
+        onMode={(mode) => {
+          setEdit((s) => ({ ...s, mode }));
+          setPriceError(null);
+        }}
+        price={edit.price}
+        onPrice={(price) => {
+          setEdit((s) => ({ ...s, price }));
+          setPriceError(null);
+        }}
+        currency={currency}
+        error={priceError}
+      />
+      <div className="flex flex-col gap-1.5">
+        <span className="text-sm font-medium text-ink">Thumbnail</span>
+        <label className="inline-flex h-11 w-fit cursor-pointer items-center gap-2 rounded border border-line bg-surface-2 px-4 text-sm font-semibold text-ink hover:bg-line focus-within:outline focus-within:outline-2 focus-within:outline-accent">
+          <input
+            type="file"
+            accept="image/jpeg,image/png"
+            className="sr-only"
+            onChange={(e) => {
+              const thumb = e.target.files?.[0] ?? null;
+              setEdit((s) => ({ ...s, thumb }));
+            }}
+          />
+          <Icon name="upload" size={16} />
+          {edit.thumb ? 'Change image' : 'Choose image'}
+        </label>
+        <p className="text-xs text-ink-3 break-all">
+          {edit.thumb ? edit.thumb.name : 'JPG or PNG, 16:9. Optional.'}
+        </p>
       </div>
-
-      {videos.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-gray-500">No videos yet. Upload your first one!</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {videos.map((video) => (
-            <div
-              key={video.id}
-              className="bg-[#16213e] rounded-xl border border-[#1a1a2e]/50 overflow-hidden"
-            >
-              {editingId === video.id ? (
-                /* Edit form */
-                <div className="p-4 space-y-3">
-                  <input
-                    type="text"
-                    value={editForm.title}
-                    onChange={(e) => setEditForm((f) => ({ ...f, title: e.target.value }))}
-                    className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-full focus:outline-none focus:border-[#e94560] transition"
-                    placeholder="Title"
-                  />
-                  <textarea
-                    value={editForm.description}
-                    onChange={(e) =>
-                      setEditForm((f) => ({
-                        ...f,
-                        description: e.target.value,
-                      }))
-                    }
-                    className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-full focus:outline-none focus:border-[#e94560] transition resize-none"
-                    placeholder="Description"
-                    rows={3}
-                  />
-                  <div className="flex gap-3 flex-wrap">
-                    <select
-                      value={editForm.access_mode}
-                      onChange={(e) =>
-                        setEditForm((f) => ({
-                          ...f,
-                          access_mode: e.target.value as Video['access_mode'],
-                        }))
-                      }
-                      className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:border-[#e94560] transition"
-                    >
-                      <option value="free">Free</option>
-                      <option value="ppv">PPV</option>
-                      <option value="premium">Premium</option>
-                      <option value="premium_buyable">Premium + Buyable</option>
-                    </select>
-                    {(editForm.access_mode === 'ppv' ||
-                      editForm.access_mode === 'premium_buyable') && (
-                      <>
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          autoComplete="off"
-                          value={editForm.ppv_price}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              ppv_price: e.target.value,
-                            }))
-                          }
-                          placeholder="Price"
-                          className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-28 focus:outline-none focus:border-[#e94560] transition"
-                        />
-                        <select
-                          value={editForm.ppv_currency}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              ppv_currency: e.target.value,
-                            }))
-                          }
-                          className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:border-[#e94560] transition"
-                        >
-                          <option value="USD">USD</option>
-                          <option value="ZWG">ZWG</option>
-                          <option value="ZAR">ZAR</option>
-                        </select>
-                      </>
-                    )}
-                  </div>
-                  <div className="flex gap-4 items-center mt-2 flex-wrap">
-                    <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={editForm.comments_enabled}
-                        onChange={(e) =>
-                          setEditForm((f) => ({ ...f, comments_enabled: e.target.checked }))
-                        }
-                        className="accent-[#e94560]"
-                      />
-                      Enable Comments
-                    </label>
-
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-gray-300 font-medium">Custom Thumbnail:</span>
-                      <input
-                        type="file"
-                        accept="image/jpeg,image/png"
-                        onChange={(e) => {
-                          const f = e.target.files?.[0];
-                          if (f) setThumbnailFile(f);
-                        }}
-                        className="text-xs text-gray-400 file:bg-[#0f0f23] file:text-white file:border file:border-gray-700 file:rounded file:px-2 file:py-1 file:mr-2 file:cursor-pointer file:hover:bg-[#1a2744]"
-                      />
-                    </div>
-                  </div>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void handleSaveEdit(video.id)}
-                      disabled={actionLoading === video.id}
-                      className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2 px-4 rounded-lg transition text-sm disabled:opacity-50"
-                    >
-                      {actionLoading === video.id ? 'Saving...' : 'Save'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setEditingId(null)}
-                      className="bg-[#0f0f23] hover:bg-[#1a2744] text-gray-400 font-semibold py-2 px-4 rounded-lg transition text-sm"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* View row */
-                <div className="flex items-center gap-3 p-3">
-                  {/* Thumbnail */}
-                  <div className="w-16 h-10 rounded bg-gray-800 shrink-0 overflow-hidden">
-                    {video.thumbnail_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature.
-                      <img
-                        src={video.thumbnail_url}
-                        alt=""
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex items-center justify-center">
-                        <svg
-                          aria-hidden="true"
-                          className="w-5 h-5 text-gray-600"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={1.5}
-                            d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M4 6h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z"
-                          />
-                        </svg>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Info */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-white truncate">{video.title}</p>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span
-                        className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATE_COLORS[video.state]}`}
-                      >
-                        {video.state}
-                      </span>
-                      <span className="text-xs text-gray-500 capitalize">
-                        {video.access_mode.replace(/_/g, ' ')}
-                      </span>
-                      {video.ppv_price_minor_units && video.ppv_price_currency && (
-                        <span className="text-xs text-yellow-400">
-                          {formatMoney(video.ppv_price_minor_units, video.ppv_price_currency)}
-                        </span>
-                      )}
-                      {video.duration_seconds != null && (
-                        <span className="text-xs text-gray-600">
-                          {formatDuration(video.duration_seconds)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => startEdit(video)}
-                      className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition"
-                    >
-                      Edit
-                    </button>
-                    <Link
-                      href={`/studio/videos/${video.id}/captions`}
-                      className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition"
-                    >
-                      Captions
-                    </Link>
-                    {video.state === 'ready' || video.state === 'unpublished' ? (
-                      <button
-                        type="button"
-                        onClick={() => void handlePublish(video.id)}
-                        disabled={actionLoading === video.id}
-                        className="text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-900/30 hover:bg-emerald-900/50 px-3 py-1.5 rounded-lg transition disabled:opacity-50"
-                      >
-                        Publish
-                      </button>
-                    ) : video.state === 'published' ? (
-                      <button
-                        type="button"
-                        onClick={() => void handleUnpublish(video.id)}
-                        disabled={actionLoading === video.id}
-                        className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition disabled:opacity-50"
-                      >
-                        Unpublish
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      <div className="flex flex-col-reverse gap-2 sm:flex-row">
+        <Button variant="ghost" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" loading={saving}>
+          Save changes
+        </Button>
+      </div>
+    </form>
   );
 }

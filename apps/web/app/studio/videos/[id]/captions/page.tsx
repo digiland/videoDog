@@ -1,9 +1,17 @@
 'use client';
-import { useCallback, useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useParams } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../../../../src/lib/api';
-import { isAuthenticated } from '../../../../../src/lib/auth';
+import type { Video } from '../../../../../src/types/api';
+import { Button } from '../../../../../src/ui/button';
+import { Field } from '../../../../../src/ui/field';
+import { Icon } from '../../../../../src/ui/icon';
+import { Notice } from '../../../../../src/ui/notice';
+import { Segmented } from '../../../../../src/ui/segmented';
+import { Skeleton } from '../../../../../src/ui/state';
+import { errorMessage } from '../../../_components/studio-data';
+import { SectionTitle } from '../../../_components/ui';
 
 interface Caption {
   id: string;
@@ -23,10 +31,10 @@ const SUGGESTED = [
 ];
 
 export default function CaptionsManagerPage() {
-  const router = useRouter();
   const params = useParams<{ id: string }>();
   const videoId = params.id;
 
+  const [title, setTitle] = useState<string | null>(null);
   const [items, setItems] = useState<Caption[] | null>(null);
   const [language, setLanguage] = useState('en');
   const [label, setLabel] = useState('English');
@@ -34,6 +42,7 @@ export default function CaptionsManagerPage() {
   const [isDefault, setIsDefault] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
@@ -41,23 +50,28 @@ export default function CaptionsManagerPage() {
     try {
       const data = await api.get<{ items: Caption[] }>(`/videos/${videoId}/captions`);
       setItems(data.items);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
+    } catch (err) {
+      setError(errorMessage(err, 'Captions didn’t load'));
+      setItems((i) => i ?? []);
     }
   }, [videoId]);
 
   useEffect(() => {
-    if (!isAuthenticated()) {
-      router.push('/sign-in');
-      return;
-    }
     void load();
-  }, [load, router]);
+    api
+      .get<Video>(`/videos/${videoId}`)
+      .then((v) => setTitle(v.title))
+      .catch(() => undefined);
+  }, [load, videoId]);
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
       setError('Choose a .vtt file first.');
+      return;
+    }
+    if (!language.trim() || !label.trim()) {
+      setError('Pick a language and give the track a name.');
       return;
     }
     setBusy(true);
@@ -66,222 +80,191 @@ export default function CaptionsManagerPage() {
     try {
       const created = await api.post<{ caption_id: string; upload_url: string }>(
         `/videos/${videoId}/captions`,
-        { language, label, kind, is_default: isDefault },
+        { language: language.trim(), label: label.trim(), kind, is_default: isDefault },
       );
       const put = await fetch(created.upload_url, {
         method: 'PUT',
         headers: { 'content-type': 'text/vtt' },
         body: file,
       });
-      if (!put.ok) throw new Error('Upload failed');
+      if (!put.ok) throw new Error('the file upload failed');
       await api.post(`/videos/${videoId}/captions/${created.caption_id}/complete`);
-      setSuccess(`Uploaded "${label}".`);
+      setSuccess(`Added “${label.trim()}”. Viewers can turn it on from the CC button.`);
       setFile(null);
       await load();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Upload failed');
+    } catch (err) {
+      setError(`Not added: ${errorMessage(err, 'try again')}.`);
     } finally {
       setBusy(false);
     }
   }
 
   async function handleDelete(id: string) {
-    if (!confirm('Delete this caption track?')) return;
+    if (confirmDelete !== id) {
+      setConfirmDelete(id);
+      return;
+    }
+    setConfirmDelete(null);
     try {
       await api.delete(`/videos/${videoId}/captions/${id}`);
       await load();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Delete failed');
+    } catch (err) {
+      setError(`Not deleted: ${errorMessage(err, 'try again')}.`);
     }
   }
 
   return (
-    <div className="max-w-4xl mx-auto px-6 py-10 fade-up">
-      <div className="flex items-center gap-2 text-sm text-ink-mute mb-2">
-        <Link href="/studio" className="hover:text-ink">
-          Studio
+    <div className="flex max-w-3xl flex-col gap-8">
+      <div className="flex flex-col gap-1">
+        <Link
+          href="/studio/videos"
+          className="inline-flex h-11 w-fit items-center gap-1 text-sm font-semibold text-ink-2 hover:text-ink"
+        >
+          <Icon name="chevronLeft" size={16} /> Videos
         </Link>
-        <span>/</span>
-        <Link href="/studio/videos" className="hover:text-ink">
-          Videos
-        </Link>
-        <span>/</span>
-        <span className="text-ink">Captions</span>
+        <h1 className="text-2xl font-bold text-ink">Captions</h1>
+        {title === null ? (
+          <Skeleton className="h-5 w-48" />
+        ) : (
+          <p className="text-sm text-ink-2 line-clamp-2">{title}</p>
+        )}
       </div>
-      <h1 className="text-3xl font-bold">Closed captions</h1>
-      <p className="text-ink-mute mt-1 max-w-xl">
-        Upload one WebVTT file per language. Viewers can switch tracks from the player&rsquo;s CC
-        menu. SRT not supported — convert to .vtt first.
-      </p>
 
-      {/* Existing tracks */}
-      <section className="mt-8">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-dim mb-3">Tracks</h2>
-        <div className="space-y-2">
-          {items === null ? (
-            <div className="bg-bg-elev border border-line rounded-lg p-6 text-center text-ink-dim text-sm">
-              Loading…
-            </div>
-          ) : items.length === 0 ? (
-            <div className="bg-bg-elev border border-line rounded-lg p-6 text-center text-ink-mute text-sm">
-              No caption tracks yet. Upload your first below.
-            </div>
-          ) : (
-            items.map((c) => (
-              <div
-                key={c.id}
-                className="bg-bg-elev border border-line rounded-lg p-4 flex items-center gap-3"
-              >
-                <div className="flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-semibold">{c.label}</span>
-                    <span className="text-xs text-ink-dim font-mono">{c.language}</span>
+      <section className="flex flex-col gap-3">
+        <SectionTitle>Tracks</SectionTitle>
+        {items === null ? (
+          <Skeleton className="h-16" />
+        ) : items.length === 0 ? (
+          <p className="rounded border border-line bg-surface px-4 py-6 text-center text-sm text-ink-2">
+            No caption tracks yet. Captions help people watch on mute — and in a second language.
+          </p>
+        ) : (
+          <ul className="flex flex-col divide-y divide-line rounded border border-line bg-surface">
+            {items.map((c) => (
+              <li key={c.id} className="flex items-center gap-3 px-4 py-3">
+                <Icon name="captions" size={20} className="shrink-0 text-ink-3" />
+                <div className="min-w-0 flex-1">
+                  <p className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold text-ink">{c.label}</span>
+                    <span className="text-xs text-ink-3">{c.language}</span>
                     {c.is_default && (
-                      <span className="text-[10px] font-bold uppercase tracking-wide bg-accent/15 text-accent px-2 py-0.5 rounded">
+                      <span className="inline-flex h-6 items-center rounded-full bg-surface-2 px-2 text-xs font-semibold text-accent">
                         Default
                       </span>
                     )}
                     {!c.ready && (
-                      <span className="text-[10px] font-bold uppercase tracking-wide bg-warn/15 text-warn px-2 py-0.5 rounded">
-                        Uploading…
+                      <span className="inline-flex h-6 items-center rounded-full bg-surface-2 px-2 text-xs font-semibold text-ink-2">
+                        Not finished
                       </span>
                     )}
-                  </div>
-                  <p className="text-xs text-ink-dim mt-0.5 capitalize">{c.kind}</p>
+                  </p>
+                  <p className="text-xs text-ink-3">
+                    {c.kind === 'captions' ? 'Captions (with sounds)' : 'Subtitles'}
+                  </p>
                 </div>
-                <button
-                  type="button"
+                <Button
+                  variant={confirmDelete === c.id ? 'danger' : 'ghost'}
                   onClick={() => void handleDelete(c.id)}
-                  className="text-sm text-ink-dim hover:text-red-400 transition"
+                  onBlur={() => setConfirmDelete((d) => (d === c.id ? null : d))}
                 >
-                  Delete
-                </button>
-              </div>
-            ))
-          )}
-        </div>
+                  {confirmDelete === c.id ? 'Tap to delete' : 'Delete'}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
-      {/* Upload form */}
-      <section className="mt-10">
-        <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-dim mb-3">
-          Add a track
-        </h2>
+      <section className="flex flex-col gap-3">
+        <SectionTitle>Add a track</SectionTitle>
         <form
           onSubmit={(e) => void handleUpload(e)}
-          className="bg-bg-elev border border-line rounded-lg p-6 space-y-4"
+          className="flex flex-col gap-5 rounded border border-line bg-surface p-4 sm:p-5"
         >
-          <div className="grid sm:grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="caption-language" className="block text-sm font-medium mb-1.5">
-                Language
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {SUGGESTED.map((s) => (
-                  <button
-                    key={s.code}
-                    type="button"
-                    onClick={() => {
-                      setLanguage(s.code);
-                      setLabel(s.label);
-                    }}
-                    className={`text-xs font-medium px-3 py-1.5 rounded-md transition ${
-                      language === s.code
-                        ? 'bg-accent text-bg'
-                        : 'bg-surface text-ink-mute hover:text-ink'
-                    }`}
-                  >
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-              <input
-                id="caption-language"
-                type="text"
-                value={language}
-                onChange={(e) => setLanguage(e.target.value)}
-                placeholder="BCP-47 code (e.g. en, sn, nd)"
-                className="mt-2 w-full bg-surface border border-line focus:border-accent rounded-md px-3 py-2 text-sm focus:outline-none transition"
-              />
+          <fieldset className="flex min-w-0 flex-col gap-2">
+            <legend className="mb-1.5 text-sm font-medium text-ink">Language</legend>
+            <div className="flex flex-wrap gap-2">
+              {SUGGESTED.map((s) => (
+                <button
+                  key={s.code}
+                  type="button"
+                  aria-pressed={language === s.code}
+                  onClick={() => {
+                    setLanguage(s.code);
+                    setLabel(s.label);
+                  }}
+                  className={`h-11 rounded border px-4 text-sm font-semibold transition-colors ${
+                    language === s.code
+                      ? 'border-accent bg-surface-2 text-ink'
+                      : 'border-line text-ink-2 hover:text-ink'
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
             </div>
-            <div>
-              <label htmlFor="caption-label" className="block text-sm font-medium mb-1.5">
-                Label (shown in player)
-              </label>
-              <input
-                id="caption-label"
-                type="text"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder="English"
-                className="w-full bg-surface border border-line focus:border-accent rounded-md px-3 py-2 text-sm focus:outline-none transition"
-              />
-              <div className="mt-3 flex items-center gap-3">
-                <label className="text-sm flex items-center gap-2">
-                  <input
-                    type="radio"
-                    checked={kind === 'subtitles'}
-                    onChange={() => setKind('subtitles')}
-                    className="accent-accent"
-                  />
-                  Subtitles
-                </label>
-                <label className="text-sm flex items-center gap-2">
-                  <input
-                    type="radio"
-                    checked={kind === 'captions'}
-                    onChange={() => setKind('captions')}
-                    className="accent-accent"
-                  />
-                  Captions (incl. sound effects)
-                </label>
-              </div>
-              <label className="mt-2 text-sm flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={isDefault}
-                  onChange={(e) => setIsDefault(e.target.checked)}
-                  className="accent-accent"
-                />
-                Show by default
-              </label>
-            </div>
-          </div>
-
-          <div>
-            <label htmlFor="caption-file" className="block text-sm font-medium mb-1.5">
-              WebVTT file
-            </label>
-            <input
-              id="caption-file"
-              type="file"
-              accept=".vtt,text/vtt"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-              className="w-full text-sm text-ink-mute file:bg-surface file:text-ink file:border-0 file:rounded file:px-3 file:py-1.5 file:mr-3 file:cursor-pointer file:hover:bg-surface-2"
+          </fieldset>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field
+              id="caption-language"
+              label="Language code"
+              value={language}
+              onChange={(e) => setLanguage(e.target.value)}
+              hint="e.g. en, sn, nd"
+              autoCapitalize="off"
             />
-            <p className="mt-1 text-xs text-ink-dim">
-              {file ? `${file.name} (${Math.round(file.size / 1024)} KB)` : 'No file selected.'}
+            <Field
+              id="caption-label"
+              label="Name in the player"
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              placeholder="English"
+            />
+          </div>
+          <Segmented
+            legend="Type"
+            value={kind}
+            options={[
+              { value: 'subtitles', label: 'Subtitles' },
+              { value: 'captions', label: 'Captions', note: 'with sounds' },
+            ]}
+            onChange={setKind}
+          />
+          <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={isDefault}
+              onChange={(e) => setIsDefault(e.target.checked)}
+              className="h-5 w-5 accent-accent"
+            />
+            Turn on by default
+          </label>
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-sm font-medium text-ink">WebVTT file</span>
+            <label className="inline-flex h-11 w-fit cursor-pointer items-center gap-2 rounded border border-line bg-surface-2 px-4 text-sm font-semibold text-ink hover:bg-line focus-within:outline focus-within:outline-2 focus-within:outline-accent">
+              <input
+                type="file"
+                accept=".vtt,text/vtt"
+                className="sr-only"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              />
+              <Icon name="upload" size={16} />
+              {file ? 'Change file' : 'Choose .vtt file'}
+            </label>
+            <p className="num break-all text-xs text-ink-3">
+              {file
+                ? `${file.name} · ${Math.max(1, Math.round(file.size / 1000))} KB`
+                : 'SRT files need converting to .vtt first.'}
             </p>
           </div>
 
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-              {error}
-            </div>
-          )}
-          {success && (
-            <div className="bg-ok/10 border border-ok/30 text-ok rounded-md px-4 py-3 text-sm">
-              {success}
-            </div>
-          )}
+          {error && <Notice tone="error">{error}</Notice>}
+          {success && <Notice tone="success">{success}</Notice>}
 
-          <button
-            type="submit"
-            disabled={busy || !file}
-            className="bg-accent hover:bg-accent-hot text-bg font-semibold py-2.5 px-5 rounded-md text-sm transition disabled:opacity-50"
-          >
-            {busy ? 'Uploading…' : 'Upload track'}
-          </button>
+          <Button type="submit" loading={busy} disabled={!file} className="sm:w-fit">
+            Add track
+          </Button>
         </form>
       </section>
     </div>

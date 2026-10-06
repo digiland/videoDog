@@ -2,7 +2,7 @@
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { clearTokens, getUser, isAuthenticated } from '../../src/lib/auth';
+import { clearTokens, getRefreshToken, getUser, isAuthenticated } from '../../src/lib/auth';
 import { api } from '../../src/lib/api';
 import { signInHref } from '../../src/lib/return-to';
 import { Icon, type IconName } from '../../src/ui/icon';
@@ -58,7 +58,8 @@ export default function NavBar() {
 
   async function signOut() {
     try {
-      await api.post('/auth/logout');
+      // Send the refresh token so the server revokes it, not just this browser's copy.
+      await api.post('/auth/logout', { refresh_token: getRefreshToken() });
     } catch {
       // signing out locally is what matters
     }

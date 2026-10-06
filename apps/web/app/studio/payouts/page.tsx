@@ -1,221 +1,228 @@
 'use client';
-import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import Link from 'next/link';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../../src/lib/api';
-import { isAuthenticated } from '../../../src/lib/auth';
 import { formatMoney } from '../../../src/lib/format';
-import { minorToJsonNumber, parseMajorToMinor } from '../../../src/lib/money-input';
+import {
+  formatMinorToMajorInput,
+  minorToJsonNumber,
+  parseMajorToMinor,
+} from '../../../src/lib/money-input';
+import { Button } from '../../../src/ui/button';
+import { Field } from '../../../src/ui/field';
+import { Notice } from '../../../src/ui/notice';
+import { Price } from '../../../src/ui/price';
+import { Segmented } from '../../../src/ui/segmented';
+import { Skeleton } from '../../../src/ui/state';
 import PayoutNumberSetup from '../../components/PayoutNumberSetup';
+import { LedgerList } from '../_components/LedgerList';
+import {
+  type BalanceResponse,
+  type LedgerEntry,
+  errorMessage,
+  fetchBalance,
+  fetchLedger,
+  fetchMe,
+  formatMsisdn,
+  usdBalance,
+} from '../_components/studio-data';
+import { PageTitle, SectionTitle } from '../_components/ui';
 
-interface Balance {
-  currency: string;
-  balance_minor: string;
-}
+type PayoutCurrency = 'USD' | 'ZWG' | 'ZAR';
 
-type PayoutCurrency = 'USD' | 'ZWG';
-
-/** ZAR is listed but disabled: there is no ZAR payout rail yet (the API rejects it). */
-const CURRENCY_OPTIONS: ReadonlyArray<{ code: string; available: PayoutCurrency | null }> = [
-  { code: 'USD', available: 'USD' },
-  { code: 'ZWG', available: 'ZWG' },
-  { code: 'ZAR', available: null },
-];
-const MIN_PAYOUT: Record<PayoutCurrency, { minor: bigint; display: string }> = {
-  USD: { minor: 500n, display: '$5.00' },
-  ZWG: { minor: 15000n, display: 'ZWG 150' },
-};
+/** API minimums (WalletService.requestPayout). ZAR has no payout rail yet. */
+const MIN_MINOR: Record<'USD' | 'ZWG', bigint> = { USD: 500n, ZWG: 15000n };
 
 export default function PayoutsPage() {
-  const router = useRouter();
-  const [balances, setBalances] = useState<Balance[] | null>(null);
-  const [currency, setCurrency] = useState<PayoutCurrency>('USD');
+  const [balance, setBalance] = useState<BalanceResponse | null>(null);
+  const [ledger, setLedger] = useState<LedgerEntry[] | null>(null);
+  const [currency, setCurrency] = useState<'USD' | 'ZWG'>('USD');
   const [amount, setAmount] = useState('');
   // Payouts always go to the number saved on the profile (changed only with an OTP).
   const [savedMsisdn, setSavedMsisdn] = useState<string | null>(null);
   const [accountPhone, setAccountPhone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!isAuthenticated()) {
-      router.push('/sign-in');
-      return;
-    }
-    void load();
-  }, [router]);
-
-  async function load() {
+  const load = useCallback(async () => {
     try {
-      const [data, me] = await Promise.all([
-        api.get<{ balances: Array<{ currency: string; balance_minor: string }> }>(
-          '/wallet/balance',
-        ),
-        api.get<{ payout_msisdn: string | null; phone_e164: string }>('/users/me'),
-      ]);
-      setBalances(data.balances);
+      const [b, me, l] = await Promise.all([fetchBalance(), fetchMe(), fetchLedger(100)]);
+      setBalance(b);
       setSavedMsisdn(me.payout_msisdn);
       setAccountPhone(me.phone_e164);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load balances');
+      if (me.preferred_payout_currency === 'ZWG') setCurrency((c) => (c === 'USD' ? 'ZWG' : c));
+      setLedger(l.entries.filter((e) => e.refType === 'payout'));
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(errorMessage(err, 'Network error'));
+      setLedger((l) => l ?? []);
     }
-  }
+  }, []);
 
-  // Earnings are held in USD; ZWG payouts are converted from it at the day's rate,
-  // so only a USD request can be checked against the balance here.
-  const usdBalance = balances?.find((b) => b.currency === 'USD');
-  const balanceMinor = usdBalance ? BigInt(usdBalance.balance_minor) : 0n;
-  const min = MIN_PAYOUT[currency];
-  const requestedMinor = parseMajorToMinor(amount);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Earnings are held in USD; ZWG payouts convert from it at the day's rate, so only a USD
+  // request can be checked against the balance here (the server checks both).
+  const bal = usdBalance(balance);
+  const balMinor = BigInt(bal.amount_minor);
+  const min = MIN_MINOR[currency];
+  const requested = parseMajorToMinor(amount);
+
+  let problem: string | null = null;
+  if (amount.trim() && requested === null) problem = 'Use digits and a dot, e.g. 25.00.';
+  else if (requested !== null && requested < min)
+    problem = `The minimum is ${formatMoney(min, currency)}.`;
+  else if (requested !== null && currency === 'USD' && requested > balMinor)
+    problem = `That's more than your balance (${formatMoney(balMinor, 'USD')}).`;
+
+  const canSubmit = requested !== null && !problem && savedMsisdn !== null && balance !== null;
 
   async function handleRequest(e: React.FormEvent) {
     e.preventDefault();
+    if (!canSubmit || requested === null) return;
     setBusy(true);
     setError(null);
     setSuccess(null);
     try {
-      if (requestedMinor === null) throw new Error('Enter a valid amount.');
       // JSON number only at the API boundary; payout amounts are far below 2^53.
       await api.post('/wallet/payout', {
-        amount_minor: minorToJsonNumber(requestedMinor),
+        amount_minor: minorToJsonNumber(requested),
         currency,
       });
-      setSuccess('Payout requested. You will be notified when it processes.');
+      setSuccess(
+        `${formatMoney(requested, currency)} is on its way to EcoCash ${formatMsisdn(savedMsisdn)}. We'll message you when it lands.`,
+      );
       setAmount('');
       await load();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Payout failed');
+    } catch (err) {
+      setError(`Payout not sent: ${errorMessage(err, 'try again')}.`);
     } finally {
       setBusy(false);
     }
   }
 
-  const canSubmit =
-    requestedMinor !== null &&
-    requestedMinor >= min.minor &&
-    (currency !== 'USD' || requestedMinor <= balanceMinor) &&
-    savedMsisdn !== null;
-
   return (
-    <div className="max-w-3xl mx-auto px-6 py-10 fade-up">
-      <div className="flex items-center gap-2 text-sm text-ink-mute mb-2">
-        <Link href="/studio" className="hover:text-ink">
-          Studio
-        </Link>
-        <span>/</span>
-        <span className="text-ink">Payouts</span>
-      </div>
-      <h1 className="text-3xl font-bold">Payouts</h1>
-      <p className="text-ink-mute mt-1 max-w-xl">
-        Withdraw earned balance to your EcoCash number. Minimums apply per currency.
-      </p>
+    <div className="flex flex-col gap-8">
+      <PageTitle title="Payouts">Withdraw your balance to EcoCash.</PageTitle>
 
-      {/* Balances */}
-      <section className="mt-8 grid sm:grid-cols-3 gap-3">
-        {(balances ?? []).map((b) => (
-          <div key={b.currency} className="bg-bg-elev border border-line rounded-lg p-5">
-            <p className="text-xs text-ink-dim uppercase tracking-wide">{b.currency} balance</p>
-            <p className="text-3xl font-bold mt-1">{formatMoney(b.balance_minor, b.currency)}</p>
+      {loadError && <Notice tone="error">Couldn&rsquo;t load your balance: {loadError}</Notice>}
+
+      <div className="grid gap-4 lg:grid-cols-[3fr_2fr] lg:items-start">
+        <section
+          aria-labelledby="withdraw-h"
+          className="flex flex-col gap-5 rounded border border-line bg-surface p-4 sm:p-5"
+        >
+          <div className="flex flex-col gap-1">
+            <h2 id="withdraw-h" className="text-xs font-semibold text-ink-3">
+              Balance
+            </h2>
+            {balance ? (
+              <Price money={bal} className="text-4xl font-bold leading-none text-ink" />
+            ) : (
+              <Skeleton className="h-10 w-32" />
+            )}
           </div>
-        ))}
-        {balances && balances.length === 0 && (
-          <div className="col-span-3 bg-bg-elev border border-line rounded-lg p-6 text-center text-ink-mute text-sm">
-            No balances yet. Publish videos and earn from views, rents, or the premium pool.
-          </div>
-        )}
-      </section>
 
-      {/* Payout number */}
-      <section className="mt-8 bg-bg-elev border border-line rounded-lg p-6">
-        <h2 className="text-lg font-semibold mb-4">Payout number</h2>
-        {accountPhone ? (
-          <PayoutNumberSetup
-            key={savedMsisdn ?? 'unset'}
-            accountPhone={accountPhone}
-            savedMsisdn={savedMsisdn}
-            onSaved={setSavedMsisdn}
-          />
-        ) : (
-          <p className="text-sm text-ink-dim">Loading…</p>
-        )}
-      </section>
-
-      {/* Request form */}
-      <section className="mt-8 bg-bg-elev border border-line rounded-lg p-6">
-        <h2 className="text-lg font-semibold mb-4">Request a payout</h2>
-
-        <form onSubmit={(e) => void handleRequest(e)} className="space-y-4">
-          <fieldset>
-            <legend className="block text-sm font-medium mb-1.5">Currency</legend>
-            <div className="flex gap-2">
-              {CURRENCY_OPTIONS.map(({ code, available }) => (
-                <button
-                  key={code}
-                  type="button"
-                  disabled={!available}
-                  onClick={() => available && setCurrency(available)}
-                  className={`text-sm font-medium px-4 py-2 rounded-md transition disabled:cursor-not-allowed ${
-                    currency === code
-                      ? 'bg-accent text-bg'
-                      : available
-                        ? 'bg-surface text-ink-mute hover:text-ink'
-                        : 'bg-surface text-ink-dim opacity-60'
-                  }`}
-                >
-                  {code}
-                  {!available && <span className="ml-1 text-[10px] uppercase">coming soon</span>}
-                </button>
-              ))}
-            </div>
-          </fieldset>
-
-          <div>
-            <label htmlFor="payout-amount" className="block text-sm font-medium mb-1.5">
-              Amount
-            </label>
-            <input
-              id="payout-amount"
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="0.00"
-              className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2 placeholder:text-ink-dim focus:outline-none transition"
+          <form onSubmit={(e) => void handleRequest(e)} className="flex flex-col gap-4">
+            <Segmented<PayoutCurrency>
+              legend="Paid in"
+              value={currency}
+              options={[
+                { value: 'USD', label: 'USD' },
+                { value: 'ZWG', label: 'ZWG' },
+                { value: 'ZAR', label: 'ZAR', disabled: true, note: 'coming soon' },
+              ]}
+              onChange={(c) => {
+                if (c === 'ZAR') return;
+                setCurrency(c);
+                setError(null);
+                setSuccess(null);
+              }}
             />
-            <p className="mt-1 text-xs text-ink-dim">
-              Minimum {min.display}. Available:{' '}
-              {formatMoney(usdBalance?.balance_minor ?? '0', 'USD')}
-              {currency !== 'USD' && ' (converted at the current rate)'}.
-            </p>
-          </div>
-
-          {!savedMsisdn && (
-            <p className="text-sm text-ink-mute">
-              Set a payout number below before requesting a payout.
-            </p>
-          )}
-
-          {error && (
-            <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-              {error}
+            <div className="flex flex-col gap-2">
+              <Field
+                id="payout-amount"
+                label="Amount"
+                prefix={currency}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder={formatMinorToMajorInput(min)}
+                value={amount}
+                onChange={(e) => {
+                  setAmount(e.target.value);
+                  setError(null);
+                  setSuccess(null);
+                }}
+                error={problem}
+                hint={
+                  currency === 'USD'
+                    ? `Minimum ${formatMoney(min, 'USD')}.`
+                    : `Minimum ${formatMoney(min, 'ZWG')}. Converted from your USD balance at today's rate.`
+                }
+                className="max-w-xs"
+              />
+              {currency === 'USD' && balMinor >= min && (
+                <button
+                  type="button"
+                  onClick={() => setAmount(formatMinorToMajorInput(balMinor))}
+                  className="inline-flex h-11 w-fit items-center rounded px-1 text-sm font-semibold text-accent hover:underline"
+                >
+                  Withdraw all ({formatMoney(balMinor, 'USD')})
+                </button>
+              )}
             </div>
-          )}
-          {success && (
-            <div className="bg-ok/10 border border-ok/30 text-ok rounded-md px-4 py-3 text-sm">
-              {success}
-            </div>
-          )}
 
-          <button
-            type="submit"
-            disabled={busy || !canSubmit}
-            className="bg-accent hover:bg-accent-hot text-bg font-semibold py-2.5 px-5 rounded-md text-sm transition disabled:opacity-50"
-          >
-            {busy ? 'Submitting…' : 'Request payout'}
-          </button>
-        </form>
+            <p className="text-sm text-ink-2">
+              {savedMsisdn ? (
+                <>
+                  Paid to EcoCash{' '}
+                  <span className="num font-semibold text-ink">{formatMsisdn(savedMsisdn)}</span>
+                </>
+              ) : (
+                'Set your EcoCash payout number first.'
+              )}
+            </p>
+
+            {error && <Notice tone="error">{error}</Notice>}
+            {success && <Notice tone="success">{success}</Notice>}
+
+            <Button type="submit" size="lg" block loading={busy} disabled={!canSubmit}>
+              {requested !== null && !problem
+                ? `Withdraw ${formatMoney(requested, currency)}`
+                : 'Withdraw'}
+            </Button>
+          </form>
+        </section>
+
+        <section
+          aria-labelledby="number-h"
+          className="flex flex-col gap-4 rounded border border-line bg-surface p-4 sm:p-5"
+        >
+          <h2 id="number-h" className="text-base font-semibold text-ink">
+            Payout number
+          </h2>
+          {accountPhone ? (
+            <PayoutNumberSetup
+              key={savedMsisdn ?? 'unset'}
+              accountPhone={accountPhone}
+              savedMsisdn={savedMsisdn}
+              onSaved={setSavedMsisdn}
+            />
+          ) : (
+            <Skeleton className="h-11" />
+          )}
+        </section>
+      </div>
+
+      <section className="flex flex-col gap-3">
+        <SectionTitle>Payout history</SectionTitle>
+        <LedgerList
+          entries={ledger}
+          empty="No payouts yet. Once your balance reaches the minimum, withdraw it here."
+        />
       </section>
     </div>
   );

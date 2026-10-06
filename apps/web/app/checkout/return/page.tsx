@@ -1,6 +1,5 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import {
   type PendingCardPayment,
@@ -8,7 +7,9 @@ import {
   readPendingCardPayment,
 } from '../../../src/lib/payments';
 import { safeReturnTo } from '../../../src/lib/return-to';
+import { Button, LinkButton } from '../../../src/ui/button';
 import DevSimulatePayment from '../../components/DevSimulatePayment';
+import { PayStatus } from '../../components/account/PayStatus';
 import { type PollOutcome, usePaymentPolling } from '../../components/usePaymentPolling';
 
 type View =
@@ -45,8 +46,8 @@ export default function CheckoutReturnPage() {
         name: 'failed',
         message:
           outcome === 'reversed'
-            ? 'The card payment was reversed. You have not been charged.'
-            : 'The card payment was declined or cancelled. You have not been charged.',
+            ? 'The card payment was reversed, so the money is back on your card.'
+            : 'The card was declined or the payment was cancelled. You have not been charged.',
       });
     },
     [router, pending],
@@ -69,82 +70,86 @@ export default function CheckoutReturnPage() {
   const retryPath = safeReturnTo(pending?.retry_path) ?? '/';
 
   return (
-    <div className="max-w-lg mx-auto px-4 sm:px-6 py-10 fade-up">
-      <h1 className="text-2xl font-bold">Card payment</h1>
-      <div
-        className="mt-6 bg-bg-elev border border-line rounded-lg p-6 space-y-4"
-        aria-live="polite"
-      >
-        {(view.name === 'loading' || view.name === 'polling' || view.name === 'completed') && (
-          <div className="flex items-center gap-3">
-            <div className="w-6 h-6 shrink-0 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-            <p className="font-semibold">
-              {view.name === 'completed'
-                ? 'Payment confirmed — taking you back…'
-                : 'Confirming your card payment…'}
-            </p>
-          </div>
-        )}
+    <div className="max-w-md mx-auto px-4 pt-6 pb-10 flex flex-col gap-6 sm:pt-16">
+      <h1 className="text-2xl font-bold text-ink">Card payment</h1>
 
-        {view.name === 'missing' && (
-          <>
-            <p className="text-sm text-ink-mute">
-              We couldn&rsquo;t find a payment in progress in this browser. If you completed a
-              payment, it will show up on the video or your subscription shortly.
-            </p>
-            <Link href="/" className="text-accent text-sm font-semibold hover:underline">
+      {(view.name === 'loading' || view.name === 'polling') && (
+        <PayStatus tone="wait" title="Confirming your card payment">
+          <p>This takes a few seconds. Keep this page open; it moves on by itself.</p>
+        </PayStatus>
+      )}
+
+      {view.name === 'completed' && (
+        <PayStatus tone="success" title="Paid">
+          <p>Taking you back now.</p>
+        </PayStatus>
+      )}
+
+      {view.name === 'missing' && (
+        <PayStatus
+          tone="info"
+          title="No payment in progress here"
+          actions={
+            <LinkButton href="/" size="lg" block>
               Go to home
-            </Link>
-          </>
-        )}
+            </LinkButton>
+          }
+        >
+          <p>
+            This browser has no card payment waiting. If you finished paying, the video or your
+            Premium pass unlocks within a few minutes.
+          </p>
+        </PayStatus>
+      )}
 
-        {view.name === 'timeout' && pending && (
-          <>
-            <p className="text-sm text-ink-mute">
-              We haven&rsquo;t received confirmation from the card provider yet. It may take a
-              little longer — you will not be charged twice.
-            </p>
-            <button
-              type="button"
+      {view.name === 'timeout' && pending && (
+        <PayStatus
+          tone="info"
+          title="No answer from the card yet"
+          actions={
+            <Button
+              size="lg"
+              block
               onClick={() => {
                 setView({ name: 'polling' });
                 start(pending.payment_id);
               }}
-              className="bg-accent hover:bg-accent-hot text-bg font-semibold px-4 py-2 rounded-md text-sm transition"
             >
               Check again
-            </button>
-          </>
-        )}
+            </Button>
+          }
+        >
+          <p>Confirmation can take a few minutes. Checking again never charges you twice.</p>
+        </PayStatus>
+      )}
 
-        {view.name === 'failed' && (
-          <>
-            <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-              {view.message}
-            </div>
-            <Link
-              href={retryPath}
-              className="block text-center w-full bg-accent hover:bg-accent-hot text-bg font-semibold py-3 rounded-md text-sm transition"
-            >
+      {view.name === 'failed' && (
+        <PayStatus
+          tone="error"
+          title="Card payment failed"
+          actions={
+            <LinkButton href={retryPath} size="lg" block>
               Try again
-            </Link>
-          </>
-        )}
+            </LinkButton>
+          }
+        >
+          <p>{view.message}</p>
+        </PayStatus>
+      )}
 
-        {(view.name === 'polling' || view.name === 'timeout') && pending && (
-          <DevSimulatePayment
-            paymentId={pending.payment_id}
-            onSimulated={() => {
-              if (view.name === 'polling') {
-                poller.pollNow();
-              } else {
-                setView({ name: 'polling' });
-                start(pending.payment_id);
-              }
-            }}
-          />
-        )}
-      </div>
+      {(view.name === 'polling' || view.name === 'timeout') && pending && (
+        <DevSimulatePayment
+          paymentId={pending.payment_id}
+          onSimulated={() => {
+            if (view.name === 'polling') {
+              poller.pollNow();
+            } else {
+              setView({ name: 'polling' });
+              start(pending.payment_id);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

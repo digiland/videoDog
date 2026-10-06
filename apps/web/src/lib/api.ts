@@ -42,6 +42,19 @@ async function doRefreshTokens(): Promise<boolean> {
   }
 }
 
+/** The API's error envelope is `{ error: { code, message } }` (DomainErrorFilter). */
+async function readError(res: Response): Promise<{ code?: string; message?: string }> {
+  const body = (await res
+    .clone()
+    .json()
+    .catch(() => null)) as {
+    error?: { code?: string; message?: string };
+    code?: string;
+    message?: string;
+  } | null;
+  return body?.error ?? body ?? {};
+}
+
 async function fetchWithAuth<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
   let token = getAccessToken();
   // The access-token cookie expires with the JWT (15 min). If it is gone but we still hold a
@@ -60,10 +73,7 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}, retry =
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
 
   if (res.status === 401 && retry) {
-    const errBody = (await res
-      .clone()
-      .json()
-      .catch(() => ({}))) as { code?: string };
+    const errBody = await readError(res);
     if (errBody.code === 'AUTH_TOKEN_REUSED') {
       clearTokens();
       window.location.href = signInHref(currentPath());
@@ -83,18 +93,16 @@ async function fetchWithAuth<T>(path: string, options: RequestInit = {}, retry =
   }
 
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({ message: 'Unknown error' }))) as {
-      message?: string;
-      code?: string;
-    };
-    throw Object.assign(new Error(err.message ?? 'Request failed'), {
+    const err = await readError(res);
+    throw Object.assign(new Error(err.message ?? `Request failed (${res.status})`), {
       code: err.code,
       status: res.status,
     });
   }
 
-  if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  // Some endpoints answer 200 with an empty body (e.g. no current subscription).
+  const text = await res.text();
+  return (text ? JSON.parse(text) : null) as T;
 }
 
 export const api = {

@@ -1,16 +1,12 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../../src/lib/api';
 import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
 import { formatMoney } from '../../src/lib/format';
 import {
-  type PaymentMethod,
-  isE164,
   isSafeRedirectUrl,
-  methodsFor,
   newIdempotencyKey,
-  normaliseMsisdn,
   providerFor,
   stashPendingCardPayment,
 } from '../../src/lib/payments';
@@ -24,24 +20,53 @@ import type {
   PaymentState,
   User,
 } from '../../src/types/api';
+import { Button } from '../../src/ui/button';
+import { Field } from '../../src/ui/field';
+import { Icon } from '../../src/ui/icon';
+import { Notice } from '../../src/ui/notice';
+import { Price, PriceWithLocal } from '../../src/ui/price';
+import { Segmented } from '../../src/ui/segmented';
+import { Skeleton } from '../../src/ui/state';
+import { PayStatus } from './account/PayStatus';
+import { errorText } from './account/errors';
+import {
+  PAY_OPTIONS,
+  type PayOption,
+  optionFor,
+  optionLabel,
+  readLastOption,
+  rememberOption,
+  splitOption,
+} from './account/payOptions';
+import { formatPhone, parsePhone } from '../../src/lib/phone';
+import { clock, useCountdown } from './account/useCountdown';
 import DevSimulatePayment from './DevSimulatePayment';
 import { type PollOutcome, usePaymentPolling } from './usePaymentPolling';
 
-const CURRENCIES: readonly PaymentCurrencyCode[] = ['USD', 'ZWG', 'ZAR'];
-
-const METHOD_LABEL: Record<PaymentMethod, string> = {
-  ecocash: 'EcoCash',
-  card: 'Card (Paystack)',
-};
+/** An EcoCash prompt lives about a minute; offer a fresh one only after that. */
+const RESEND_PROMPT_AFTER_S = 60;
 
 export type CheckoutTarget =
   | { kind: 'purchase'; videoId: string }
   | { kind: 'subscription'; planId: string };
 
+/** What is being bought, shown at the top of every checkout state. */
+export interface CheckoutItem {
+  /** "Pay once, watch any time" / "Premium · 30 days" */
+  caption: string;
+  title: string;
+  thumbnailUrl?: string | null;
+  /** Extra line under the title, e.g. data cost. */
+  meta?: ReactNode;
+}
+
 interface Props {
   target: CheckoutTarget;
+  item?: CheckoutItem;
   /** Listed price, shown before the order is created. The server decides the charge. */
   listPrice?: MoneyDTO;
+  /** Render-only approximations of the price in other currencies ("≈ ZWG 40.18"). */
+  quotes?: MoneyDTO[];
   initialCurrency?: string;
   /**
    * Same-origin path to land on after a card payment completes (the browser leaves for
@@ -67,35 +92,27 @@ type Phase =
   | { name: 'awaiting'; paymentId: string; amount: MoneyDTO }
   | { name: 'timeout'; paymentId: string; amount: MoneyDTO }
   | { name: 'failed'; message: string }
-  | { name: 'completed' };
-
-function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
-}
-
-function asPaymentCurrency(c: string | undefined): PaymentCurrencyCode {
-  return c === 'ZWG' || c === 'ZAR' ? c : 'USD';
-}
+  | { name: 'completed'; amount: MoneyDTO | null };
 
 export default function Checkout({
   target,
+  item,
   listPrice,
+  quotes,
   initialCurrency,
   returnPath,
   onCompleted,
 }: Props) {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>({ name: 'init' });
-  const [currency, setCurrency] = useState<PaymentCurrencyCode>(asPaymentCurrency(initialCurrency));
-  const [preferredMethod, setPreferredMethod] = useState<PaymentMethod>('ecocash');
+  const [option, setOption] = useState<PayOption>('ecocash:USD');
   const [msisdn, setMsisdn] = useState('');
+  const [editingNumber, setEditingNumber] = useState(false);
   const [accountPhone, setAccountPhone] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const resendTimer = useCountdown(0);
 
-  const methods = methodsFor(currency);
-  const method: PaymentMethod = methods.includes(preferredMethod)
-    ? preferredMethod
-    : (methods[0] ?? 'ecocash');
+  const { currency, method } = splitOption(option);
 
   const orderRef = useRef<Order | null>(null);
   // One idempotency key per payment attempt; reused if the same attempt is retried
@@ -116,7 +133,10 @@ export default function Checkout({
     if (!mountedRef.current) return;
     if (outcome === 'completed') {
       attemptRef.current = null;
-      setPhase({ name: 'completed' });
+      setPhase((p) => ({
+        name: 'completed',
+        amount: p.name === 'awaiting' || p.name === 'timeout' ? p.amount : null,
+      }));
       onCompletedRef.current();
       return;
     }
@@ -131,14 +151,14 @@ export default function Checkout({
       name: 'failed',
       message:
         outcome === 'reversed'
-          ? 'The payment was reversed. You have not been charged.'
-          : 'The payment was declined or cancelled. You have not been charged.',
+          ? 'The payment was reversed, so the money is back with you.'
+          : 'It was declined or cancelled on the phone. You have not been charged.',
     });
   }, []);
 
   const poller = usePaymentPolling(handleOutcome);
 
-  // Sign-in gate + number prefill from the profile phone.
+  // Sign-in gate, number prefill from the profile, and the way they paid last time.
   useEffect(() => {
     if (!isAuthenticated() && !getRefreshToken()) {
       // Come back to this checkout (purchase page or pricing) after signing in.
@@ -147,17 +167,26 @@ export default function Checkout({
     }
     let cancelled = false;
     void (async () => {
+      let profileCurrency: string | null = null;
       try {
         const me =
           await api.get<Pick<User, 'phone_e164' | 'preferred_display_currency'>>('/users/me');
         if (cancelled) return;
         setAccountPhone(me.phone_e164);
         setMsisdn((cur) => cur || me.phone_e164);
-        if (!initialCurrency) setCurrency(asPaymentCurrency(me.preferred_display_currency));
+        profileCurrency = me.preferred_display_currency;
       } catch {
         // Prefill is a convenience; the number can still be typed.
+        if (!cancelled) setEditingNumber(true);
       }
-      if (!cancelled) setPhase({ name: 'form' });
+      if (cancelled) return;
+      setOption(
+        readLastOption() ??
+          optionFor(initialCurrency) ??
+          optionFor(profileCurrency) ??
+          'ecocash:USD',
+      );
+      setPhase({ name: 'form' });
     })();
     return () => {
       cancelled = true;
@@ -190,23 +219,23 @@ export default function Checkout({
     return order;
   }
 
-  async function handlePay(e: React.FormEvent) {
-    e.preventDefault();
+  async function pay() {
     setFormError(null);
     const provider = providerFor(currency, method);
     if (!provider) {
-      setFormError(`${METHOD_LABEL[method]} isn't available for ${currency}.`);
+      setFormError(`${optionLabel(option)} isn't available. Pick another way to pay.`);
       return;
     }
     // The API needs an MSISDN for every payment: the EcoCash wallet to prompt, or (for
     // cards) the account's own phone for the provider's records.
-    const typed = normaliseMsisdn(msisdn.trim());
+    const typed = parsePhone(msisdn);
     const number = method === 'card' && accountPhone ? accountPhone : typed;
-    if (!isE164(number)) {
+    if (!number) {
+      setEditingNumber(true);
       setFormError(
         method === 'card'
-          ? 'Enter your phone number in international format, e.g. +263771234567.'
-          : 'Enter your EcoCash number in international format, e.g. +263771234567.',
+          ? 'Enter your phone number, like 077 123 4567.'
+          : 'Enter the EcoCash number to charge, like 077 123 4567.',
       );
       return;
     }
@@ -227,6 +256,8 @@ export default function Checkout({
         idempotency_key: attemptRef.current.key,
       });
       if (!mountedRef.current) return;
+      rememberOption(option);
+      setEditingNumber(false);
 
       if (payment.status !== 'initiated' && payment.status !== 'pending') {
         // Already settled (e.g. an idempotent replay of an attempt that finished).
@@ -238,7 +269,7 @@ export default function Checkout({
         if (!isSafeRedirectUrl(payment.redirect_url)) {
           // e.g. an idempotent replay of an earlier attempt, which carries no redirect URL.
           attemptRef.current = null;
-          setFormError('Could not open the card checkout. Please try again.');
+          setFormError('The card page did not open. Try again.');
           setPhase({ name: 'form' });
           return;
         }
@@ -253,80 +284,122 @@ export default function Checkout({
         return;
       }
 
+      resendTimer.restart(RESEND_PROMPT_AFTER_S);
       startWaiting(payment.payment_id, order.amount, null);
     } catch (err: unknown) {
       if (!mountedRef.current) return;
       // Keep attemptRef: retrying this same attempt must reuse its idempotency key.
-      setFormError(errorMessage(err, 'Could not start the payment. Please try again.'));
+      setFormError(
+        errorText(err, 'The payment did not start. Check your connection and try again.'),
+      );
       setPhase({ name: 'form' });
     }
   }
 
+  /**
+   * A new EcoCash prompt for the same number. Only offered after the first prompt has had
+   * time to lapse; it is a new attempt (new key). If both somehow go through, the API books
+   * the second as a refund due rather than charging for the video twice.
+   */
+  function resendPrompt() {
+    poller.stop();
+    attemptRef.current = null;
+    void pay();
+  }
+
+  function changeNumber() {
+    // Keep the attempt's key: resubmitting the same number/currency returns this same
+    // payment instead of sending a second charge. A different number is a new attempt.
+    poller.stop();
+    setEditingNumber(true);
+    setPhase({ name: 'form' });
+  }
+
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  if (phase.name === 'init' || phase.name === 'redirecting') {
-    return (
-      <div className="flex flex-col items-center gap-3 py-10" aria-live="polite">
-        <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-        {phase.name === 'redirecting' && (
-          <p className="text-sm text-ink-mute">Taking you to secure card checkout…</p>
-        )}
-      </div>
-    );
-  }
+  const exact = listPrice && listPrice.currency === currency ? listPrice : null;
+  const approx = exact ? null : (quotes?.find((q) => q.currency === currency) ?? null);
+  const settledAmount =
+    phase.name === 'awaiting' || phase.name === 'timeout'
+      ? phase.amount
+      : phase.name === 'completed'
+        ? phase.amount
+        : null;
 
-  if (phase.name === 'completed') {
-    return (
-      <div className="bg-ok/10 border border-ok/30 rounded-md px-4 py-4 text-sm text-ok">
-        Payment confirmed.
+  const summary = (item || listPrice) && (
+    <div className="flex items-start gap-3 pb-4 border-b border-line">
+      {item?.thumbnailUrl && (
+        <img
+          src={item.thumbnailUrl}
+          alt=""
+          width={96}
+          height={54}
+          loading="lazy"
+          decoding="async"
+          className="w-24 aspect-video shrink-0 rounded-md object-cover bg-surface-2"
+        />
+      )}
+      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+        {item && <p className="text-xs font-semibold text-ink-3">{item.caption}</p>}
+        {item && <p className="font-semibold text-ink line-clamp-2 break-words">{item.title}</p>}
+        {item?.meta}
       </div>
-    );
-  }
+      {(settledAmount ?? listPrice) && (
+        <div className="shrink-0 text-right text-lg">
+          {settledAmount ? (
+            <Price money={settledAmount} className="font-bold text-ink" />
+          ) : (
+            listPrice && <PriceWithLocal price={listPrice} local={approx} />
+          )}
+        </div>
+      )}
+    </div>
+  );
 
-  if (phase.name === 'awaiting' || phase.name === 'timeout') {
-    const amount = formatMoney(phase.amount.amount_minor, phase.amount.currency);
-    return (
-      <div className="space-y-4" aria-live="polite">
-        {phase.name === 'awaiting' ? (
-          <>
-            <div className="flex items-center gap-3">
-              <div className="w-6 h-6 shrink-0 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-              <p className="font-semibold">Approve the payment on your phone (EcoCash prompt)</p>
-            </div>
-            <p className="text-sm text-ink-mute">
-              We sent a request for <span className="font-semibold text-ink">{amount}</span> to{' '}
-              <span className="font-mono">{msisdn}</span>. Enter your EcoCash PIN when prompted.
-              This page updates automatically.
-            </p>
-          </>
-        ) : (
-          <>
-            <p className="font-semibold">Still waiting for EcoCash to confirm</p>
-            <p className="text-sm text-ink-mute">
-              We have not received confirmation for {amount} yet. If you approved it, it may take a
-              little longer — check again in a moment. You will not be charged twice.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => startWaiting(phase.paymentId, phase.amount, null)}
-                className="bg-accent hover:bg-accent-hot text-bg font-semibold px-4 py-2 rounded-md text-sm transition"
-              >
-                Check again
-              </button>
-              <button
-                type="button"
-                // Keep the attempt's key: resubmitting the same number/currency returns this
-                // same payment instead of sending a second charge. A different number or
-                // currency is a new attempt (new key).
-                onClick={() => setPhase({ name: 'form' })}
-                className="bg-surface hover:bg-surface-2 border border-line font-semibold px-4 py-2 rounded-md text-sm transition"
-              >
-                Change number or currency
-              </button>
-            </div>
-          </>
-        )}
+  return (
+    <div className="flex flex-col gap-5">
+      {summary}
+      {renderBody()}
+    </div>
+  );
+
+  function renderBody() {
+    if (phase.name === 'init') {
+      return (
+        <div className="flex flex-col gap-5" aria-busy>
+          <Skeleton className="h-[100px]" />
+          <Skeleton className="h-11" />
+          <Skeleton className="h-12" />
+        </div>
+      );
+    }
+
+    if (phase.name === 'redirecting') {
+      return (
+        <PayStatus tone="wait" title="Opening the card page">
+          <p>Paystack&rsquo;s secure page will ask for your card. You come back here after.</p>
+        </PayStatus>
+      );
+    }
+
+    if (phase.name === 'completed') {
+      return (
+        <PayStatus tone="success" title="Paid">
+          <p>
+            {phase.amount ? (
+              <>
+                <Price money={phase.amount} className="font-semibold text-ink" /> received.{' '}
+              </>
+            ) : null}
+            You&rsquo;re all set.
+          </p>
+        </PayStatus>
+      );
+    }
+
+    if (phase.name === 'awaiting' || phase.name === 'timeout') {
+      const where = method === 'ecocash' ? formatPhone(msisdn) : null;
+      const dev = (
         <DevSimulatePayment
           paymentId={phase.paymentId}
           onSimulated={() =>
@@ -335,136 +408,204 @@ export default function Checkout({
               : startWaiting(phase.paymentId, phase.amount, null)
           }
         />
-      </div>
-    );
-  }
-
-  if (phase.name === 'failed') {
-    return (
-      <div className="space-y-4" aria-live="polite">
-        <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-          {phase.message}
-        </div>
-        <button
-          type="button"
-          onClick={() => setPhase({ name: 'form' })}
-          className="w-full bg-accent hover:bg-accent-hot text-bg font-semibold py-3 rounded-md text-sm transition"
-        >
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  const busy = phase.name === 'submitting';
-  const showNumberInput = method === 'ecocash' || !accountPhone;
-  return (
-    <form onSubmit={(e) => void handlePay(e)} className="space-y-5">
-      {listPrice && (
-        <p className="text-sm text-ink-mute">
-          Price:{' '}
-          <span className="font-semibold text-ink">
-            {formatMoney(listPrice.amount_minor, listPrice.currency)}
-          </span>
-          {currency !== listPrice.currency && (
-            <span className="block text-xs text-ink-dim mt-0.5">
-              Charged in {currency} at today&rsquo;s rate; the exact amount is confirmed before you
-              pay.
-            </span>
+      );
+      if (phase.name === 'timeout') {
+        return (
+          <>
+            <PayStatus
+              tone="info"
+              title={
+                method === 'ecocash' ? 'No answer from EcoCash yet' : 'No answer from the card yet'
+              }
+              actions={
+                <>
+                  <Button
+                    size="lg"
+                    block
+                    onClick={() => startWaiting(phase.paymentId, phase.amount, null)}
+                  >
+                    Check again
+                  </Button>
+                  {method === 'ecocash' && (
+                    <Button variant="secondary" size="lg" block onClick={changeNumber}>
+                      Use another number
+                    </Button>
+                  )}
+                </>
+              }
+            >
+              <p>
+                If you approved it, confirmation can take a few minutes. Checking again never
+                charges you twice.
+              </p>
+            </PayStatus>
+            {dev}
+          </>
+        );
+      }
+      return (
+        <>
+          <PayStatus
+            tone="wait"
+            title={method === 'ecocash' ? 'Check your phone' : 'Confirming your card payment'}
+          >
+            {where ? (
+              <>
+                <p className="text-base text-ink">
+                  Approve the prompt on <span className="num font-semibold">{where}</span>. Enter
+                  your EcoCash PIN on your phone.
+                </p>
+                <p>This page updates by itself once EcoCash confirms.</p>
+              </>
+            ) : (
+              <p>This page updates by itself.</p>
+            )}
+          </PayStatus>
+          {method === 'ecocash' && (
+            <div className="flex flex-col gap-2 border-t border-line pt-4">
+              <p className="text-sm text-ink-3">Didn&rsquo;t get the prompt?</p>
+              <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="secondary"
+                  disabled={resendTimer.left > 0}
+                  onClick={resendPrompt}
+                  className="num"
+                >
+                  {resendTimer.left > 0 ? `Resend in ${clock(resendTimer.left)}` : 'Resend'}
+                </Button>
+                <Button variant="secondary" onClick={changeNumber}>
+                  Change number
+                </Button>
+              </div>
+            </div>
           )}
-        </p>
-      )}
+          {dev}
+        </>
+      );
+    }
 
-      <fieldset>
-        <legend className="block text-sm font-medium mb-1.5">Pay in</legend>
-        <div className="flex flex-wrap gap-2">
-          {CURRENCIES.map((code) => (
-            <button
-              key={code}
-              type="button"
+    if (phase.name === 'failed') {
+      return (
+        <PayStatus
+          tone="error"
+          title={method === 'ecocash' ? 'EcoCash payment failed' : 'Card payment failed'}
+          actions={
+            <>
+              <Button size="lg" block onClick={() => setPhase({ name: 'form' })}>
+                Try again
+              </Button>
+              {method === 'ecocash' && (
+                <Button variant="ghost" block onClick={changeNumber}>
+                  Use another number
+                </Button>
+              )}
+            </>
+          }
+        >
+          <p>{phase.message}</p>
+        </PayStatus>
+      );
+    }
+
+    const busy = phase.name === 'submitting';
+    const showNumberField = method === 'ecocash' ? editingNumber || !msisdn : !accountPhone;
+    const amountText = exact
+      ? formatMoney(exact.amount_minor, exact.currency)
+      : approx
+        ? `≈ ${formatMoney(approx.amount_minor, approx.currency)}`
+        : listPrice
+          ? `in ${currency}`
+          : '';
+    const payLabel = `Pay${amountText ? ` ${amountText}` : ''} ${
+      method === 'ecocash' ? 'with EcoCash' : 'by card'
+    }`;
+
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void pay();
+        }}
+        className="flex flex-col gap-5"
+        noValidate
+      >
+        <Segmented<PayOption>
+          legend="Pay with"
+          value={option}
+          options={PAY_OPTIONS.map((o) => ({ value: o, label: optionLabel(o), disabled: busy }))}
+          onChange={(o) => {
+            setOption(o);
+            setFormError(null);
+          }}
+        />
+
+        {method === 'ecocash' &&
+          (showNumberField ? (
+            <Field
+              label="EcoCash number"
+              name="msisdn"
+              type="tel"
+              inputMode="tel"
+              autoComplete="tel"
+              placeholder="077 123 4567"
+              value={msisdn.startsWith('+263') ? formatPhone(msisdn) : msisdn}
+              onChange={(e) => {
+                setMsisdn(e.target.value);
+                setFormError(null);
+              }}
               disabled={busy}
-              aria-pressed={currency === code}
-              onClick={() => setCurrency(code)}
-              className={`text-sm font-medium px-4 py-2 rounded-md transition ${
-                currency === code ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
-              }`}
-            >
-              {code}
-            </button>
+              hint="The approval prompt goes to this phone."
+            />
+          ) : (
+            <div className="flex items-center gap-3 min-h-11 rounded border border-line bg-surface pl-3 pr-1">
+              <Icon name="phone" size={18} className="text-ink-3 shrink-0" />
+              <div className="flex-1 min-w-0 flex flex-col leading-tight py-1.5">
+                <span className="text-xs text-ink-3">Prompt goes to</span>
+                <span className="num font-semibold text-ink">{formatPhone(msisdn)}</span>
+              </div>
+              <Button variant="ghost" size="sm" onClick={() => setEditingNumber(true)}>
+                Change
+              </Button>
+            </div>
           ))}
-        </div>
-      </fieldset>
 
-      <fieldset>
-        <legend className="block text-sm font-medium mb-1.5">Pay with</legend>
-        <div className="flex flex-wrap gap-2">
-          {methods.map((m) => (
-            <button
-              key={m}
-              type="button"
-              disabled={busy}
-              aria-pressed={method === m}
-              onClick={() => setPreferredMethod(m)}
-              className={`text-sm font-medium px-4 py-2 rounded-md transition ${
-                method === m ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
-              }`}
-            >
-              {METHOD_LABEL[m]}
-            </button>
-          ))}
-        </div>
-        {method === 'card' && (
-          <p className="mt-1 text-xs text-ink-dim">
-            Visa / Mastercard via Paystack. You&rsquo;ll be sent to Paystack&rsquo;s secure page and
-            brought back here.
-          </p>
-        )}
-      </fieldset>
-
-      {showNumberInput && (
-        <div>
-          <label htmlFor="checkout-msisdn" className="block text-sm font-medium mb-1.5">
-            {method === 'ecocash' ? 'EcoCash number' : 'Phone number'}
-          </label>
-          <input
-            id="checkout-msisdn"
+        {method === 'card' && !accountPhone && (
+          <Field
+            label="Phone number"
+            name="msisdn"
             type="tel"
             inputMode="tel"
             autoComplete="tel"
+            placeholder="+27 82 123 4567"
             value={msisdn}
             onChange={(e) => {
               setMsisdn(e.target.value);
               setFormError(null);
             }}
-            placeholder="+263771234567"
             disabled={busy}
-            className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md px-4 py-2.5 placeholder:text-ink-dim focus:outline-none transition"
           />
-          {method === 'ecocash' && (
-            <p className="mt-1 text-xs text-ink-dim">
-              You&rsquo;ll get a prompt on this phone to approve with your EcoCash PIN.
-            </p>
-          )}
-        </div>
-      )}
+        )}
 
-      {formError && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-          {formError}
-        </div>
-      )}
+        {formError && <Notice tone="error">{formError}</Notice>}
 
-      <button
-        type="submit"
-        disabled={busy}
-        className="w-full bg-accent hover:bg-accent-hot text-bg font-semibold py-3 rounded-md text-sm transition disabled:opacity-50"
-      >
-        {busy
-          ? 'Starting payment…'
-          : method === 'card'
-            ? 'Continue to card payment'
-            : 'Pay with EcoCash'}
-      </button>
-    </form>
-  );
+        <div className="flex flex-col gap-2">
+          <Button type="submit" size="lg" block loading={busy}>
+            {busy ? 'Starting payment' : payLabel}
+          </Button>
+          <p className="text-xs text-ink-3 text-center">
+            {method === 'ecocash'
+              ? 'You approve it on your phone with your EcoCash PIN.'
+              : 'Opens Paystack’s secure card page, then brings you back.'}
+            {!exact && listPrice && (
+              <>
+                {' '}
+                Charged in {currency} at today&rsquo;s rate; the exact amount shows before you
+                approve.
+              </>
+            )}
+          </p>
+        </div>
+      </form>
+    );
+  }
 }
