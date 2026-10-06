@@ -1,5 +1,23 @@
 # StreamZW — implementation review (2026-05-26)
 
+> **Status update (2026-10-06).** The money-path fixes below landed together, with
+> integration tests against real Postgres (`apps/api/src/**/*.int.test.ts`, run in CI).
+> Items marked ✅ are fixed; the original review follows unchanged for history.
+>
+> - ✅ Build: `main` compiles again (missing `Inject` import, `FxService` injection, `@nestjs/schedule` dependency); web and shared lint pass.
+> - ✅ Payment amounts are server-derived: `POST /payments` charges the pending purchase/subscription the caller owns; only tips take a client amount. Provider must match the charge currency; ZIPIT/Paystack are refused until implemented.
+> - ✅ Webhook settlement is one DB transaction with the payment row `FOR UPDATE`: concurrent duplicates settle once, a crash part-way rolls back for the retry. Signature is checked over the raw body with the payment's own provider; production refuses to boot without `ECOCASH_WEBHOOK_SECRET`.
+> - ✅ Tips credit the creator (90/10) in any currency; a second payment for an already-unlocked video is booked to `refunds_due`, not double-credited.
+> - ✅ Payouts: balance check + debit under an advisory lock; always paid to the profile's `payout_msisdn`; ZWG/ZAR payouts convert from `creator_balance.USD` through `fx_holding`.
+> - ✅ Subscription renewals actually charge the provider (stored `payer_msisdn`), retry daily through the 3-day grace, and never stack a charge on an open attempt.
+> - ✅ Premium pool: 45% of subscription revenue now moves to `platform_revenue` in the same transaction as the 55% creator split; CAT month boundaries; deterministic odd-cent allocation; daily `watch.aggregate` job is now scheduled (nothing enqueued it before, so the pool paid nobody).
+> - ✅ Watch time: 4 counted heartbeats = 1 minute, via one conditional UPDATE (no double-count under concurrency).
+> - ✅ Refresh tokens: rotation claimed atomically; reuse revokes the whole forward chain.
+> - ✅ BullMQ connections now honour `REDIS_URL` (ioredis has no `url` option, so every queue was silently on localhost).
+> - ✅ System ledger accounts are unique even with `owner_id IS NULL` (migration 0013).
+>
+> **Still open:** §3.12 reconcile-with-provider on state transitions; changing `payout_msisdn` should require a fresh OTP; payout processor (payouts stay `requested`); paywall display currency still hardcoded to USD on `/videos/:id/playlist`; ZIPIT/Paystack; BunnyCDN signed URLs; 1080p; web `parseFloat(x) * 100` price inputs; `*.repository.ts` extraction.
+
 Review of `apps/`, `packages/`, `infra/` against `tickets/M01–M10` and the §3 invariants in [CLAUDE.md](../CLAUDE.md). M11 (Flutter) is deferred per memory.
 
 ## TL;DR

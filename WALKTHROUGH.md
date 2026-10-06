@@ -60,9 +60,9 @@ docker exec -it streamzw-postgres psql -U streamzw -d streamzw \
    - `premium` → "Day pass $0.99 / Month $1.49" plans
    - `premium_buyable` → both buttons
 5. **Subscribe** — pick a plan. POST `/subscriptions` then POST `/payments`. EcoCash sandbox returns a redirect URL → you complete the test payment → webhook lands at `/webhooks/ecocash` → ledger entries written → sub state flips to `active`.
-   - ⚠️ **Known bug** — the subscription is currently inserted with `state='active'` _before_ the payment webhook fires (see REVIEW.md #4). Treat the flow as working "optimistically" until that's fixed.
-6. **Buy a PPV** — ⚠️ **Currently broken**: no `POST /purchases` endpoint exists; only `admin-grants` inserts `purchases`. Use the admin grant flow below to simulate a successful PPV until the endpoint lands.
-7. **Tip a free video** — POST `/payments` with `intent='tip'`. ⚠️ Non-USD tips currently drop without ledger entries.
+   - The subscription stays `pending` until the webhook confirms payment. `POST /payments` takes `intent='subscription'` and `intent_ref_id=<subscription_id>`; the amount comes from the subscription, not the request.
+6. **Buy a PPV** — `POST /purchases` with `{ video_id, payment_currency }` creates a pending purchase, then `POST /payments` with `intent='purchase'`, `intent_ref_id=<purchase_id>`, `provider='ecocash_usd'` (or `ecocash_zwg` for a ZWG purchase) and `msisdn`.
+7. **Tip a free video** — `POST /payments` with `intent='tip'`, `intent_ref_id=<video_id>`, `amount_minor` and `currency`. The creator is credited 90% in USD.
 
 ## Creator flow (`demo_creator`)
 
