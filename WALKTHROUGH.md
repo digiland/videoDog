@@ -53,22 +53,22 @@ docker exec -it streamzw-postgres psql -U streamzw -d streamzw \
 ## Viewer flow (`demo_viewer`)
 
 1. **Browse** — open <http://localhost:3000>. Catalogue lists `published` videos; free videos play without sign-in. Search via `/search?q=…&mode=free|ppv|premium`.
-2. **Sign in** — top-right "Sign in" → enter `+263771000001` → read OTP from API logs → verify.
-3. **Watch free** — click any `free` video. Player streams signed HLS from BunnyCDN (or RustFS direct in dev). Heartbeats fire every 15 s and accumulate in `watch_sessions` / `watch_minutes_daily`.
+2. **Sign in** — top-right "Sign in" → enter `+263771000001` → read the OTP from the API logs (needs `DEV_LOG_OTP=true`) → verify.
+3. **Watch free** — click any `free` video. `GET /videos/:id/playlist` returns a playback grant: a BunnyCDN directory-token URL when `BUNNYCDN_*` is set, otherwise an API-served playlist (`/playback/:id/:token/master.m3u8`) whose segments are presigned storage URLs. Heartbeats every 15 s; four make a minute (`watch_sessions`, rolled up daily into `watch_minutes_daily`).
 4. **Hit a paywall** — open a `ppv` or `premium` video. `checkAccess` returns a `PaywallPayload` with the right options:
    - `ppv` → "Unlock for $1.49" button
    - `premium` → "Day pass $0.99 / Month $1.49" plans
    - `premium_buyable` → both buttons
-5. **Subscribe** — pick a plan. POST `/subscriptions` then POST `/payments`. EcoCash sandbox returns a redirect URL → you complete the test payment → webhook lands at `/webhooks/ecocash` → ledger entries written → sub state flips to `active`.
+5. **Subscribe** — `/pricing` → pick a plan and currency → EcoCash number → the checkout polls `GET /payments/:id` until the webhook (or reconciliation) completes it. In dev, set `DEV_SIMULATE_PAYMENTS=true` (API) and `NEXT_PUBLIC_DEV_SIMULATE_PAYMENTS=true` (web) to get "Simulate success" buttons.
    - The subscription stays `pending` until the webhook confirms payment. `POST /payments` takes `intent='subscription'` and `intent_ref_id=<subscription_id>`; the amount comes from the subscription, not the request.
-6. **Buy a PPV** — `POST /purchases` with `{ video_id, payment_currency }` creates a pending purchase, then `POST /payments` with `intent='purchase'`, `intent_ref_id=<purchase_id>`, `provider='ecocash_usd'` (or `ecocash_zwg` for a ZWG purchase) and `msisdn`.
+6. **Buy a PPV** — the paywall's Buy button opens `/purchase/:id`. Under the hood: `POST /purchases` with `{ video_id, payment_currency }` creates a pending purchase, then `POST /payments` with `intent='purchase'`, `intent_ref_id=<purchase_id>`, `provider='ecocash_usd'` (or `ecocash_zwg` for a ZWG purchase) and `msisdn`.
 7. **Tip a free video** — `POST /payments` with `intent='tip'`, `intent_ref_id=<video_id>`, `amount_minor` and `currency`. The creator is credited 90% in USD.
 
 ## Creator flow (`demo_creator`)
 
 1. **Sign in** as `+263771000002`. Role is already `creator` in seed.
 2. **Studio** — go to <http://localhost:3000/studio>. Shows earnings, videos, payouts.
-3. **Upload** — `/studio/upload`: pick an MP4 → multipart-presigned PUT to RustFS → `POST /videos/:id/complete-upload` enqueues `transcode` BullMQ job.
+3. **Upload** — `/studio/upload`: `POST /videos` → `POST /videos/:id/upload/multipart` (8 MiB presigned parts, resumable via `GET …/upload/multipart/:uploadId`) → `…/complete` enqueues the `transcode` job (240–1080p HLS, never above the source).
    - ⚠️ Transcode worker is defined in `apps/api/src/workers/transcode.worker.ts` but **never started**. Jobs queue but don't drain. Either start it manually or wait for the M3 wiring PR.
 4. **Set access mode** — pick `free | ppv | premium | premium_buyable`. For PPV / premium_buyable, set price (will be persisted in the creator's `canonical_pricing_currency`, locked at first publish).
 5. **Publish** — `POST /videos/:id/publish`. State machine: `uploading → processing → ready → published`.
@@ -77,12 +77,12 @@ docker exec -it streamzw-postgres psql -U streamzw -d streamzw \
    - Premium pool: monthly cron at 01:00 CAT distributes `sub_revenue × 0.55` proportional to watch-minutes on `in_premium_pool` videos.
      - ⚠️ Cron not scheduled in `main.ts`. Run worker by hand to test.
    - Tips: 90 % credited to creator.
-7. **Request payout** — `/studio/payouts`. Min thresholds: USD ≥ $5.00, ZWG ≥ 150, ZAR ≥ 100. Inserts a `payouts` row in `requested`. ⚠️ Non-USD payout path not implemented.
+7. **Request payout** — `/studio/payouts`. Min thresholds: USD ≥ $5.00, ZWG ≥ 150, ZAR ≥ 100. Payouts go to the profile's payout number, which can only be changed with an OTP (`POST /users/me/payout-msisdn`). USD or ZWG (ZWG is converted from your USD balance via `fx_holding`). The payout processor sends them every 10 minutes; a rejected payout is returned to your balance.
 
 ## Admin flow (`demo_admin`)
 
 1. **Sign in** as `+263771000099`. Role `admin` from seed.
-2. **Grant access** — `POST /admin/grants` with `{ user_id, video_id }`. Inserts a `purchases` row directly so the user bypasses the paywall. Useful for support and to unblock PPV testing until the buy endpoint lands.
+2. **Grant access** — `POST /admin/grants` with `{ user_id, video_id }`. Inserts a `purchases` row directly so the user bypasses the paywall. Useful for support.
 3. **FX override** — `POST /admin/fx/override` with `{ base, quote, rate, effective_from }`. Inserts a `fx_rates` row with `source='manual', source_priority=100` so it wins lookups.
 4. **Refresh rates** — `POST /admin/fx/refresh` (cron equivalent: `fx.refresh` at 06:00 CAT). Pulls RBZ scraper + OpenExchangeRates → new `fx_rates` rows.
 5. **Inspect ledger** — there's no admin UI for ledger inspection yet; query directly:
