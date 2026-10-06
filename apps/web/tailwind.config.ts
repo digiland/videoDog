@@ -21,13 +21,6 @@ const config: Config = {
         sage: 'var(--sage)',
         danger: 'var(--danger)',
         scrim: 'var(--scrim)',
-        // Legacy aliases — removed once every page is migrated.
-        'bg-elev': 'var(--surface)',
-        'ink-mute': 'var(--ink-2)',
-        'ink-dim': 'var(--ink-3)',
-        'accent-hot': 'var(--accent-strong)',
-        warn: 'var(--gold)',
-        ok: 'var(--sage)',
       },
       fontFamily: {
         sans: ['var(--font-sans)'],
