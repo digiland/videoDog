@@ -119,15 +119,15 @@ export default function StudioVideosPage() {
         comments_enabled: editForm.comments_enabled,
       };
       if (editForm.access_mode === 'ppv' || editForm.access_mode === 'premium_buyable') {
-        body.ppv_price_minor_units = Math.round(parseFloat(editForm.ppv_price) * 100);
+        body.ppv_price_minor_units = Math.round(Number.parseFloat(editForm.ppv_price) * 100);
         body.ppv_price_currency = editForm.ppv_currency;
       }
       await api.patch(`/videos/${id}`, body);
       setEditingId(null);
       setThumbnailFile(null);
       await loadVideos();
-    } catch (err: any) {
-      alert(err.message || 'Failed to save changes');
+    } catch (err: unknown) {
+      alert((err instanceof Error && err.message) || 'Failed to save changes');
     } finally {
       setActionLoading(null);
     }
@@ -264,6 +264,7 @@ export default function StudioVideosPage() {
                   </div>
                   <div className="flex gap-2">
                     <button
+                      type="button"
                       onClick={() => void handleSaveEdit(video.id)}
                       disabled={actionLoading === video.id}
                       className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2 px-4 rounded-lg transition text-sm disabled:opacity-50"
@@ -271,6 +272,7 @@ export default function StudioVideosPage() {
                       {actionLoading === video.id ? 'Saving...' : 'Save'}
                     </button>
                     <button
+                      type="button"
                       onClick={() => setEditingId(null)}
                       className="bg-[#0f0f23] hover:bg-[#1a2744] text-gray-400 font-semibold py-2 px-4 rounded-lg transition text-sm"
                     >
@@ -293,6 +295,7 @@ export default function StudioVideosPage() {
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <svg
+                          aria-hidden="true"
                           className="w-5 h-5 text-gray-600"
                           fill="none"
                           viewBox="0 0 24 24"
@@ -337,6 +340,7 @@ export default function StudioVideosPage() {
                   {/* Actions */}
                   <div className="flex items-center gap-2 shrink-0">
                     <button
+                      type="button"
                       onClick={() => startEdit(video)}
                       className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition"
                     >
@@ -350,6 +354,7 @@ export default function StudioVideosPage() {
                     </Link>
                     {video.state === 'ready' || video.state === 'unpublished' ? (
                       <button
+                        type="button"
                         onClick={() => void handlePublish(video.id)}
                         disabled={actionLoading === video.id}
                         className="text-xs text-emerald-400 hover:text-emerald-300 bg-emerald-900/30 hover:bg-emerald-900/50 px-3 py-1.5 rounded-lg transition disabled:opacity-50"
@@ -358,6 +363,7 @@ export default function StudioVideosPage() {
                       </button>
                     ) : video.state === 'published' ? (
                       <button
+                        type="button"
                         onClick={() => void handleUnpublish(video.id)}
                         disabled={actionLoading === video.id}
                         className="text-xs text-gray-400 hover:text-white bg-[#0f0f23] hover:bg-[#1a2744] px-3 py-1.5 rounded-lg transition disabled:opacity-50"

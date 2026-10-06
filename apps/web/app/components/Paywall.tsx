@@ -18,6 +18,7 @@ export default function Paywall({ payload, videoId }: PaywallProps) {
       <div className="flex justify-center mb-4">
         <div className="w-16 h-16 rounded-full bg-[#e94560]/10 flex items-center justify-center">
           <svg
+            aria-hidden="true"
             className="w-8 h-8 text-[#e94560]"
             fill="none"
             viewBox="0 0 24 24"

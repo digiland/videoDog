@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../../src/lib/api';
 import type { Earnings, WalletBalance } from '../../../src/types/api';
 import { formatMoney } from '../../../src/lib/format';
@@ -28,11 +28,7 @@ export default function EarningsPage() {
   const [payoutError, setPayoutError] = useState<string | null>(null);
   const [payoutSuccess, setPayoutSuccess] = useState(false);
 
-  useEffect(() => {
-    void loadData();
-  }, [month]);
-
-  async function loadData() {
+  const loadData = useCallback(async () => {
     setLoading(true);
     try {
       const [earningsData, balanceData] = await Promise.allSettled([
@@ -44,7 +40,11 @@ export default function EarningsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [month]);
+
+  useEffect(() => {
+    void loadData();
+  }, [loadData]);
 
   async function handlePayout(e: React.FormEvent) {
     e.preventDefault();
@@ -53,15 +53,15 @@ export default function EarningsPage() {
       setPayoutError('Please fill in all fields.');
       return;
     }
-    const amountNum = parseFloat(payoutAmount);
-    if (isNaN(amountNum) || amountNum <= 0) {
+    const amountNum = Number.parseFloat(payoutAmount);
+    if (Number.isNaN(amountNum) || amountNum <= 0) {
       setPayoutError('Enter a valid amount.');
       return;
     }
     setPayoutLoading(true);
     try {
       await api.post('/wallet/payout', {
-        amount: Math.round(amountNum * 100),
+        amount_minor: Math.round(amountNum * 100),
         currency: payoutCurrency,
         msisdn: payoutMsisdn,
         idempotency_key: generateIdempotencyKey(),
@@ -144,6 +144,7 @@ export default function EarningsPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-white">Wallet Balance</h2>
               <button
+                type="button"
                 onClick={() => {
                   setShowPayoutModal(true);
                   setPayoutSuccess(false);
@@ -182,6 +183,7 @@ export default function EarningsPage() {
               <div className="text-center py-6">
                 <div className="w-12 h-12 rounded-full bg-green-900/30 flex items-center justify-center mx-auto mb-3">
                   <svg
+                    aria-hidden="true"
                     className="w-6 h-6 text-green-400"
                     fill="none"
                     viewBox="0 0 24 24"
@@ -200,6 +202,7 @@ export default function EarningsPage() {
                   Processing typically takes 1-2 business days.
                 </p>
                 <button
+                  type="button"
                   onClick={() => setShowPayoutModal(false)}
                   className="mt-4 bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2 px-6 rounded-lg transition"
                 >
@@ -210,8 +213,14 @@ export default function EarningsPage() {
               <form onSubmit={(e) => void handlePayout(e)} className="space-y-4">
                 <div className="flex gap-3">
                   <div className="flex-1">
-                    <label className="block text-sm font-medium text-gray-300 mb-1.5">Amount</label>
+                    <label
+                      htmlFor="earnings-payout-amount"
+                      className="block text-sm font-medium text-gray-300 mb-1.5"
+                    >
+                      Amount
+                    </label>
                     <input
+                      id="earnings-payout-amount"
                       type="number"
                       value={payoutAmount}
                       onChange={(e) => setPayoutAmount(e.target.value)}
@@ -222,10 +231,14 @@ export default function EarningsPage() {
                     />
                   </div>
                   <div className="w-24">
-                    <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                    <label
+                      htmlFor="earnings-payout-currency"
+                      className="block text-sm font-medium text-gray-300 mb-1.5"
+                    >
                       Currency
                     </label>
                     <select
+                      id="earnings-payout-currency"
                       value={payoutCurrency}
                       onChange={(e) => setPayoutCurrency(e.target.value)}
                       className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2 w-full focus:outline-none focus:border-[#e94560] transition"
@@ -238,10 +251,14 @@ export default function EarningsPage() {
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                  <label
+                    htmlFor="earnings-payout-msisdn"
+                    className="block text-sm font-medium text-gray-300 mb-1.5"
+                  >
                     EcoCash number (E.164)
                   </label>
                   <input
+                    id="earnings-payout-msisdn"
                     type="tel"
                     value={payoutMsisdn}
                     onChange={(e) => setPayoutMsisdn(e.target.value)}

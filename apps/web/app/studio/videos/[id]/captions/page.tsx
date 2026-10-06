@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '../../../../../src/lib/api';
@@ -37,22 +37,22 @@ export default function CaptionsManagerPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!isAuthenticated()) {
-      router.push('/sign-in');
-      return;
-    }
-    void load();
-  }, [videoId, router]);
-
-  async function load() {
+  const load = useCallback(async () => {
     try {
       const data = await api.get<{ items: Caption[] }>(`/videos/${videoId}/captions`);
       setItems(data.items);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     }
-  }
+  }, [videoId]);
+
+  useEffect(() => {
+    if (!isAuthenticated()) {
+      router.push('/sign-in');
+      return;
+    }
+    void load();
+  }, [load, router]);
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
@@ -150,6 +150,7 @@ export default function CaptionsManagerPage() {
                   <p className="text-xs text-ink-dim mt-0.5 capitalize">{c.kind}</p>
                 </div>
                 <button
+                  type="button"
                   onClick={() => void handleDelete(c.id)}
                   className="text-sm text-ink-dim hover:text-red-400 transition"
                 >
@@ -172,7 +173,9 @@ export default function CaptionsManagerPage() {
         >
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1.5">Language</label>
+              <label htmlFor="caption-language" className="block text-sm font-medium mb-1.5">
+                Language
+              </label>
               <div className="flex flex-wrap gap-1.5">
                 {SUGGESTED.map((s) => (
                   <button
@@ -193,6 +196,7 @@ export default function CaptionsManagerPage() {
                 ))}
               </div>
               <input
+                id="caption-language"
                 type="text"
                 value={language}
                 onChange={(e) => setLanguage(e.target.value)}
@@ -201,8 +205,11 @@ export default function CaptionsManagerPage() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1.5">Label (shown in player)</label>
+              <label htmlFor="caption-label" className="block text-sm font-medium mb-1.5">
+                Label (shown in player)
+              </label>
               <input
+                id="caption-label"
                 type="text"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
@@ -242,8 +249,11 @@ export default function CaptionsManagerPage() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">WebVTT file</label>
+            <label htmlFor="caption-file" className="block text-sm font-medium mb-1.5">
+              WebVTT file
+            </label>
             <input
+              id="caption-file"
               type="file"
               accept=".vtt,text/vtt"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}

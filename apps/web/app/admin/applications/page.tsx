@@ -113,6 +113,7 @@ export default function AdminApplicationsPage() {
               </div>
               <div className="md:col-span-3 flex md:flex-col gap-2">
                 <button
+                  type="button"
                   onClick={() => void decide(a.id, 'approve')}
                   disabled={busyId === a.id}
                   className="flex-1 bg-ok hover:opacity-90 text-bg font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50"
@@ -120,6 +121,7 @@ export default function AdminApplicationsPage() {
                   Approve
                 </button>
                 <button
+                  type="button"
                   onClick={() => void decide(a.id, 'reject')}
                   disabled={busyId === a.id}
                   className="flex-1 bg-surface hover:bg-surface-2 text-ink-mute hover:text-ink font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50"

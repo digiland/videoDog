@@ -48,9 +48,9 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
     setCcMenuOpen(false);
     const video = videoRef.current;
     if (!video) return;
-    Array.from(video.textTracks).forEach((t) => {
+    for (const t of Array.from(video.textTracks)) {
       t.mode = t.id === id ? 'showing' : 'disabled';
-    });
+    }
   }
 
   const startSession = useCallback(async () => {
@@ -235,7 +235,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
   }
 
   function formatTime(s: number): string {
-    if (!isFinite(s)) return '0:00';
+    if (!Number.isFinite(s)) return '0:00';
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
     return `${m}:${sec.toString().padStart(2, '0')}`;
@@ -255,6 +255,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
       onMouseLeave={() => setShowControls(false)}
     >
       {/* Video element */}
+      {/* biome-ignore lint/a11y/useMediaCaption lint/a11y/useKeyWithClickEvents: caption <track>s are rendered dynamically from the `captions` prop (kind is data-driven), and click-to-toggle is a mouse shortcut — keyboard users use the dedicated play/pause button below (the <video> itself is not focusable). */}
       <video
         ref={videoRef}
         className="w-full h-full"
@@ -289,11 +290,13 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
         {/* Center play/pause */}
         {!playing && (
           <button
+            type="button"
             onClick={togglePlayPause}
             className="absolute inset-0 flex items-center justify-center"
           >
             <div className="w-16 h-16 rounded-full bg-[#e94560]/90 flex items-center justify-center">
               <svg className="w-8 h-8 text-white ml-1" fill="currentColor" viewBox="0 0 24 24">
+                <title>Play</title>
                 <path d="M8 5v14l11-7z" />
               </svg>
             </div>
@@ -317,15 +320,18 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
           <div className="flex items-center gap-3">
             {/* Play/Pause */}
             <button
+              type="button"
               onClick={togglePlayPause}
               className="text-white hover:text-[#e94560] transition min-w-[44px] min-h-[44px] flex items-center justify-center"
             >
               {playing ? (
                 <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <title>Pause</title>
                   <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
                 </svg>
               ) : (
                 <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 24 24">
+                  <title>Play</title>
                   <path d="M8 5v14l11-7z" />
                 </svg>
               )}
@@ -334,15 +340,18 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
             {/* Volume */}
             <div className="flex items-center gap-2">
               <button
+                type="button"
                 onClick={toggleMute}
                 className="text-white hover:text-[#e94560] transition min-w-[44px] min-h-[44px] flex items-center justify-center"
               >
                 {muted || volume === 0 ? (
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <title>Unmute</title>
                     <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
                   </svg>
                 ) : (
                   <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <title>Mute</title>
                     <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" />
                   </svg>
                 )}
@@ -367,6 +376,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
             {captions.length > 0 && (
               <div className="relative">
                 <button
+                  type="button"
                   onClick={() => setCcMenuOpen((v) => !v)}
                   className={`text-xs font-bold border rounded px-2 py-1 transition ${
                     activeCaptionId
@@ -380,6 +390,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
                 {ccMenuOpen && (
                   <div className="absolute bottom-full mb-2 right-0 bg-bg-elev border border-line rounded-md shadow-2xl py-1 min-w-[160px] z-10">
                     <button
+                      type="button"
                       onClick={() => selectCaption(null)}
                       className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface transition ${
                         activeCaptionId === null ? 'text-accent font-semibold' : 'text-ink-mute'
@@ -389,6 +400,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
                     </button>
                     {captions.map((c) => (
                       <button
+                        type="button"
                         key={c.id}
                         onClick={() => selectCaption(c.id)}
                         className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-surface transition ${
@@ -412,7 +424,7 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
               >
                 <option value={-1}>Auto</option>
                 {levels.map((l, i) => (
-                  <option key={i} value={i}>
+                  <option key={`${l.height}p-${l.bitrate}`} value={i}>
                     {l.height}p
                   </option>
                 ))}
@@ -421,15 +433,18 @@ export default function Player({ src, videoId, captions = [] }: PlayerProps) {
 
             {/* Fullscreen */}
             <button
+              type="button"
               onClick={() => void toggleFullscreen()}
               className="text-white hover:text-[#e94560] transition min-w-[44px] min-h-[44px] flex items-center justify-center"
             >
               {fullscreen ? (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <title>Exit fullscreen</title>
                   <path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z" />
                 </svg>
               ) : (
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                  <title>Enter fullscreen</title>
                   <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z" />
                 </svg>
               )}

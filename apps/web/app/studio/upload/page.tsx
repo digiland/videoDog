@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../../../src/lib/api';
 import { isAuthenticated, getUser } from '../../../src/lib/auth';
@@ -43,11 +43,10 @@ export default function UploadPage() {
   const [videoId, setVideoId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function cleanup() {
+  const cleanup = useCallback(() => {
     if (pollRef.current) clearInterval(pollRef.current);
-  }
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -62,7 +61,7 @@ export default function UploadPage() {
     }
     if (
       (accessMode === 'ppv' || accessMode === 'premium_buyable') &&
-      (!ppvPrice || isNaN(parseFloat(ppvPrice)) || parseFloat(ppvPrice) <= 0)
+      (!ppvPrice || Number.isNaN(Number.parseFloat(ppvPrice)) || Number.parseFloat(ppvPrice) <= 0)
     ) {
       setError('Please enter a valid price.');
       return;
@@ -77,7 +76,7 @@ export default function UploadPage() {
         access_mode: accessMode,
       };
       if (accessMode === 'ppv' || accessMode === 'premium_buyable') {
-        body.ppv_price_minor_units = Math.round(parseFloat(ppvPrice) * 100);
+        body.ppv_price_minor_units = Math.round(Number.parseFloat(ppvPrice) * 100);
         body.ppv_price_currency = ppvCurrency;
       }
 
@@ -157,7 +156,7 @@ export default function UploadPage() {
   }
 
   // Cleanup on unmount
-  useEffect(() => cleanup, []);
+  useEffect(() => cleanup, [cleanup]);
 
   const isLoading = [
     'creating',
@@ -175,6 +174,7 @@ export default function UploadPage() {
         <div className="bg-[#16213e] rounded-xl border border-green-700/30 p-8 text-center">
           <div className="w-16 h-16 rounded-full bg-green-900/30 flex items-center justify-center mx-auto mb-4">
             <svg
+              aria-hidden="true"
               className="w-8 h-8 text-green-400"
               fill="none"
               viewBox="0 0 24 24"
@@ -198,6 +198,7 @@ export default function UploadPage() {
               View video
             </a>
             <button
+              type="button"
               onClick={() => {
                 setUploadState('idle');
                 setTitle('');
@@ -217,6 +218,7 @@ export default function UploadPage() {
         <div className="bg-[#16213e] rounded-xl border border-[#1a1a2e]/50 p-8 text-center">
           <div className="w-16 h-16 rounded-full bg-blue-900/30 flex items-center justify-center mx-auto mb-4">
             <svg
+              aria-hidden="true"
               className="w-8 h-8 text-blue-400"
               fill="none"
               viewBox="0 0 24 24"
@@ -235,6 +237,7 @@ export default function UploadPage() {
             Your video is ready. Publish it to make it visible to viewers.
           </p>
           <button
+            type="button"
             onClick={() => void handlePublish()}
             className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-3 px-8 rounded-lg transition"
           >
@@ -273,10 +276,14 @@ export default function UploadPage() {
 
           <form onSubmit={(e) => void handleSubmit(e)} className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
+              <label
+                htmlFor="upload-title"
+                className="block text-sm font-medium text-gray-300 mb-1.5"
+              >
                 Title <span className="text-red-400">*</span>
               </label>
               <input
+                id="upload-title"
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
@@ -287,8 +294,14 @@ export default function UploadPage() {
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Description</label>
+              <label
+                htmlFor="upload-description"
+                className="block text-sm font-medium text-gray-300 mb-1.5"
+              >
+                Description
+              </label>
               <textarea
+                id="upload-description"
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 placeholder="Describe your video..."
@@ -298,8 +311,8 @@ export default function UploadPage() {
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Access mode</label>
+            <fieldset>
+              <legend className="block text-sm font-medium text-gray-300 mb-2">Access mode</legend>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                 {(['free', 'ppv', 'premium', 'premium_buyable'] as AccessMode[]).map((mode) => (
                   <label
@@ -324,13 +337,19 @@ export default function UploadPage() {
                   </label>
                 ))}
               </div>
-            </div>
+            </fieldset>
 
             {(accessMode === 'ppv' || accessMode === 'premium_buyable') && (
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1.5">Price</label>
+                <label
+                  htmlFor="upload-ppv-price"
+                  className="block text-sm font-medium text-gray-300 mb-1.5"
+                >
+                  Price
+                </label>
                 <div className="flex gap-3">
                   <input
+                    id="upload-ppv-price"
                     type="number"
                     value={ppvPrice}
                     onChange={(e) => setPpvPrice(e.target.value)}
@@ -359,19 +378,22 @@ export default function UploadPage() {
             )}
 
             <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
+              <label
+                htmlFor="upload-video-file"
+                className="block text-sm font-medium text-gray-300 mb-1.5"
+              >
                 Video file <span className="text-red-400">*</span>
               </label>
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition ${
+              {/* The whole drop zone is a <label> so clicking anywhere opens the hidden file picker. */}
+              <label
+                className={`block border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition ${
                   file
                     ? 'border-[#e94560]/50 bg-[#e94560]/5'
                     : 'border-gray-700 hover:border-gray-500 bg-[#0f0f23]'
                 } ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}
               >
                 <input
-                  ref={fileInputRef}
+                  id="upload-video-file"
                   type="file"
                   accept="video/*"
                   className="hidden"
@@ -385,6 +407,7 @@ export default function UploadPage() {
                   <div>
                     <div className="w-10 h-10 rounded-full bg-[#e94560]/20 flex items-center justify-center mx-auto mb-2">
                       <svg
+                        aria-hidden="true"
                         className="w-5 h-5 text-[#e94560]"
                         fill="none"
                         viewBox="0 0 24 24"
@@ -407,6 +430,7 @@ export default function UploadPage() {
                   <div>
                     <div className="w-10 h-10 rounded-full bg-gray-700/50 flex items-center justify-center mx-auto mb-2">
                       <svg
+                        aria-hidden="true"
                         className="w-5 h-5 text-gray-500"
                         fill="none"
                         viewBox="0 0 24 24"
@@ -426,7 +450,7 @@ export default function UploadPage() {
                     </p>
                   </div>
                 )}
-              </div>
+              </label>
             </div>
 
             {error && (

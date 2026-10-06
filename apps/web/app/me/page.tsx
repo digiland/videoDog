@@ -115,8 +115,11 @@ export default function ProfilePage() {
         <h2 className="text-lg font-semibold mb-4">Profile</h2>
         <form onSubmit={(e) => void handleSave(e)} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium mb-1.5">Display name</label>
+            <label htmlFor="me-display-name" className="block text-sm font-medium mb-1.5">
+              Display name
+            </label>
             <input
+              id="me-display-name"
               type="text"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
@@ -125,8 +128,8 @@ export default function ProfilePage() {
             />
           </div>
 
-          <div>
-            <label className="block text-sm font-medium mb-1.5">Display currency</label>
+          <fieldset>
+            <legend className="block text-sm font-medium mb-1.5">Display currency</legend>
             <div className="flex gap-2">
               {CURRENCIES.map((c) => (
                 <button
@@ -141,7 +144,7 @@ export default function ProfilePage() {
                 </button>
               ))}
             </div>
-          </div>
+          </fieldset>
 
           {error && (
             <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
@@ -244,6 +247,7 @@ export default function ProfilePage() {
       )}
 
       <button
+        type="button"
         onClick={() => void handleSignOut()}
         className="text-sm text-ink-dim hover:text-accent transition"
       >

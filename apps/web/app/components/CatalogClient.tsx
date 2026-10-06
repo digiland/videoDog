@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Video } from '../../src/types/api';
 import VideoCard from './VideoCard';
 
@@ -17,6 +17,9 @@ interface CatalogClientProps {
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+
+// Placeholder skeletons are purely positional; give each a fixed key.
+const SKELETON_KEYS = Array.from({ length: 10 }, (_, i) => `skeleton-${i}`);
 
 function SkeletonCard() {
   return (
@@ -71,7 +74,8 @@ export default function CatalogClient({
     }
   }
 
-  async function loadMore() {
+  // Reads only refs and state setters, so it is stable for the component's lifetime.
+  const loadMore = useCallback(async () => {
     const c = cursorRef.current;
     if (!c || loadingRef.current) return;
     setLoading(true);
@@ -89,7 +93,7 @@ export default function CatalogClient({
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     if (!sentinelRef.current) return;
@@ -101,7 +105,7 @@ export default function CatalogClient({
     );
     obs.observe(sentinelRef.current);
     return () => obs.disconnect();
-  }, []);
+  }, [loadMore]);
 
   return (
     <>
@@ -120,6 +124,7 @@ export default function CatalogClient({
             const active = activeMode === m.key;
             return (
               <button
+                type="button"
                 key={m.key}
                 onClick={() => void handleModeChange(m.key)}
                 className={`shrink-0 px-3 py-1.5 rounded text-sm font-medium transition ${
@@ -135,15 +140,15 @@ export default function CatalogClient({
 
       {loading && videos.length === 0 ? (
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-8">
-          {Array.from({ length: 10 }).map((_, i) => (
-            <SkeletonCard key={i} />
+          {SKELETON_KEYS.map((k) => (
+            <SkeletonCard key={k} />
           ))}
         </div>
       ) : videos.length === 0 ? (
         <div>
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-8 opacity-30 pointer-events-none">
-            {Array.from({ length: 10 }).map((_, i) => (
-              <SkeletonCard key={i} />
+            {SKELETON_KEYS.map((k) => (
+              <SkeletonCard key={k} />
             ))}
           </div>
           <div className="text-center mt-10">

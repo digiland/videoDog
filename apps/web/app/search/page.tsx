@@ -51,6 +51,7 @@ export default async function SearchPage({
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <div className="w-16 h-16 rounded-full bg-[#16213e] flex items-center justify-center mb-4">
             <svg
+              aria-hidden="true"
               className="w-8 h-8 text-gray-600"
               fill="none"
               viewBox="0 0 24 24"

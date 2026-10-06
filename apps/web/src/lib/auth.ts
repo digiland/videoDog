@@ -40,7 +40,9 @@ export function isAuthenticated(): boolean {
   const token = getAccessToken();
   if (!token) return false;
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]!)) as {
+    const encodedPayload = token.split('.')[1];
+    if (!encodedPayload) return false;
+    const payload = JSON.parse(atob(encodedPayload)) as {
       exp: number;
     };
     return payload.exp * 1000 > Date.now();
@@ -53,7 +55,9 @@ export function getUser(): { id: string; role: string } | null {
   const token = getAccessToken();
   if (!token) return null;
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]!)) as {
+    const encodedPayload = token.split('.')[1];
+    if (!encodedPayload) return null;
+    const payload = JSON.parse(atob(encodedPayload)) as {
       sub: string;
       role: string;
     };

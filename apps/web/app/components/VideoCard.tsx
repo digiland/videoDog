@@ -17,10 +17,12 @@ interface VideoCardProps {
 export default function VideoCard({ video, index = 0 }: VideoCardProps) {
   const creatorName = video.creator?.display_name ?? video.creator?.handle ?? 'StreamZW';
   const badge = BADGE[video.access_mode];
-  const showPrice =
+  const price =
     (video.access_mode === 'ppv' || video.access_mode === 'premium_buyable') &&
     video.ppv_price_minor_units &&
-    video.ppv_price_currency;
+    video.ppv_price_currency
+      ? { minor: video.ppv_price_minor_units, currency: video.ppv_price_currency }
+      : null;
 
   return (
     <Link
@@ -38,7 +40,12 @@ export default function VideoCard({ video, index = 0 }: VideoCardProps) {
           />
         ) : (
           <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-surface-2 to-surface">
-            <svg className="w-12 h-12 text-ink-dim/40" fill="currentColor" viewBox="0 0 24 24">
+            <svg
+              aria-hidden="true"
+              className="w-12 h-12 text-ink-dim/40"
+              fill="currentColor"
+              viewBox="0 0 24 24"
+            >
               <path d="M8 5v14l11-7z" />
             </svg>
           </div>
@@ -47,7 +54,7 @@ export default function VideoCard({ video, index = 0 }: VideoCardProps) {
         {/* Hover overlay */}
         <div className="absolute inset-0 bg-bg/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
           <div className="w-12 h-12 rounded-full bg-ink/90 flex items-center justify-center text-bg">
-            <svg className="w-5 h-5 fill-current ml-0.5" viewBox="0 0 24 24">
+            <svg aria-hidden="true" className="w-5 h-5 fill-current ml-0.5" viewBox="0 0 24 24">
               <path d="M8 5v14l11-7z" />
             </svg>
           </div>
@@ -71,11 +78,11 @@ export default function VideoCard({ video, index = 0 }: VideoCardProps) {
           {video.title}
         </h3>
         <p className="text-xs text-ink-dim mt-0.5 truncate">{creatorName}</p>
-        {showPrice && (
+        {price && (
           <p className="text-xs text-ink-mute mt-1">
             From{' '}
             <span className="text-ink font-semibold">
-              {formatMoney(video.ppv_price_minor_units!, video.ppv_price_currency!)}
+              {formatMoney(price.minor, price.currency)}
             </span>
           </p>
         )}

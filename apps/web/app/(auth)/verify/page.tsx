@@ -6,6 +6,8 @@ import { setTokens } from '../../../src/lib/auth';
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
 
 const CODE_LENGTH = 6;
+// One fixed key per OTP slot — the slots are positional and never reorder.
+const SLOT_KEYS = Array.from({ length: CODE_LENGTH }, (_, i) => `otp-slot-${i}`);
 
 export default function VerifyPage() {
   const searchParams = useSearchParams();
@@ -117,9 +119,9 @@ export default function VerifyPage() {
         </p>
 
         <div className="mt-6 flex gap-2 justify-between" onPaste={handlePaste}>
-          {digits.map((digit, i) => (
+          {SLOT_KEYS.map((slotKey, i) => (
             <input
-              key={i}
+              key={slotKey}
               ref={(el) => {
                 inputRefs.current[i] = el;
               }}
@@ -127,7 +129,7 @@ export default function VerifyPage() {
               inputMode="numeric"
               pattern="\d*"
               maxLength={1}
-              value={digit}
+              value={digits[i] ?? ''}
               onChange={(e) => handleDigitChange(i, e.target.value)}
               onKeyDown={(e) => handleKeyDown(i, e)}
               disabled={loading}
@@ -143,6 +145,7 @@ export default function VerifyPage() {
         )}
 
         <button
+          type="button"
           onClick={() => code.length === CODE_LENGTH && void submitCode(code)}
           disabled={code.length < CODE_LENGTH || loading}
           className="mt-6 w-full bg-accent hover:bg-accent-hot text-bg font-semibold py-3 rounded-md transition disabled:opacity-50 flex items-center justify-center gap-2"
@@ -162,6 +165,7 @@ export default function VerifyPage() {
             <p className="text-ok text-xs">Code resent</p>
           ) : (
             <button
+              type="button"
               onClick={() => void handleResend()}
               disabled={resendLoading}
               className="text-xs text-ink-dim hover:text-accent transition disabled:opacity-50"

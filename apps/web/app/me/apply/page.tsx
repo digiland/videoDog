@@ -41,6 +41,7 @@ export default function ApplyCreatorPage() {
       <div className="max-w-md mx-auto px-6 py-24 text-center fade-up">
         <div className="w-12 h-12 mx-auto rounded-full bg-ok/20 flex items-center justify-center mb-4">
           <svg
+            aria-hidden="true"
             className="w-6 h-6 text-ok"
             fill="none"
             viewBox="0 0 24 24"
@@ -68,8 +69,11 @@ export default function ApplyCreatorPage() {
         className="mt-8 space-y-5 bg-bg-elev border border-line rounded-lg p-6"
       >
         <div>
-          <label className="block text-sm font-medium mb-1.5">What will you make?</label>
+          <label htmlFor="apply-pitch" className="block text-sm font-medium mb-1.5">
+            What will you make?
+          </label>
           <textarea
+            id="apply-pitch"
             value={pitch}
             onChange={(e) => setPitch(e.target.value)}
             rows={6}
@@ -79,10 +83,10 @@ export default function ApplyCreatorPage() {
           <p className="mt-1 text-xs text-ink-dim">{pitch.length}/800 · minimum 20 characters</p>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium mb-1.5">
+        <fieldset>
+          <legend className="block text-sm font-medium mb-1.5">
             Pricing currency (locked once approved)
-          </label>
+          </legend>
           <div className="flex gap-2">
             {CURRENCIES.map((c) => (
               <button
@@ -97,7 +101,7 @@ export default function ApplyCreatorPage() {
               </button>
             ))}
           </div>
-        </div>
+        </fieldset>
 
         {error && (
           <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">

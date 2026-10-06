@@ -90,6 +90,7 @@ export default function NavBar() {
         <form onSubmit={handleSearch} className="flex-1 max-w-md ml-auto">
           <div className="relative">
             <svg
+              aria-hidden="true"
               className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-dim"
               fill="none"
               viewBox="0 0 24 24"
@@ -119,6 +120,7 @@ export default function NavBar() {
               className="hidden sm:inline-flex items-center gap-1.5 bg-accent hover:bg-accent-hot text-bg rounded-md px-3 py-1.5 text-sm font-semibold transition"
             >
               <svg
+                aria-hidden="true"
                 className="w-4 h-4"
                 fill="none"
                 viewBox="0 0 24 24"
@@ -134,6 +136,7 @@ export default function NavBar() {
           {authed ? (
             <div className="relative" ref={dropdownRef}>
               <button
+                type="button"
                 onClick={() => setDropdownOpen((v) => !v)}
                 className="flex items-center gap-2 hover:bg-surface rounded-md px-2 py-1.5 transition"
               >
@@ -144,6 +147,7 @@ export default function NavBar() {
                   {badge.label}
                 </span>
                 <svg
+                  aria-hidden="true"
                   className="w-3 h-3 text-ink-dim"
                   fill="none"
                   viewBox="0 0 24 24"
@@ -199,6 +203,7 @@ export default function NavBar() {
                   )}
                   <div className="border-t border-line my-1" />
                   <button
+                    type="button"
                     onClick={() => {
                       setDropdownOpen(false);
                       void handleSignOut();

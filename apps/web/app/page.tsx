@@ -63,7 +63,7 @@ export default async function HomePage({
                   href={`/v/${featured.id}`}
                   className="bg-ink text-bg hover:bg-ink-mute font-semibold rounded-md px-6 py-3 text-sm flex items-center gap-2 transition"
                 >
-                  <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                  <svg aria-hidden="true" className="w-4 h-4 fill-current" viewBox="0 0 24 24">
                     <path d="M8 5v14l11-7z" />
                   </svg>
                   Watch now

@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../../src/lib/api';
 import { getAccessToken } from '../../src/lib/auth';
@@ -36,11 +36,7 @@ export default function PricingPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
-    void load();
-  }, [currency]);
-
-  async function load() {
+  const load = useCallback(async () => {
     try {
       const data = await api.get<{ items: PlanQuote[] }>(
         `/subscriptions/plans?currency=${currency}`,
@@ -57,7 +53,11 @@ export default function PricingPage() {
         /* not signed in */
       }
     }
-  }
+  }, [currency]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
 
   async function subscribe(planId: string) {
     if (!getAccessToken()) {
@@ -90,6 +90,7 @@ export default function PricingPage() {
         <span className="text-sm text-ink-dim mr-2">Show prices in</span>
         {CURRENCIES.map((c) => (
           <button
+            type="button"
             key={c}
             onClick={() => setCurrency(c)}
             className={`text-sm font-medium px-3 py-1.5 rounded-md transition ${
@@ -151,6 +152,7 @@ export default function PricingPage() {
                 <ul className="mt-6 space-y-2 text-sm text-ink-mute">
                   <li className="flex items-center gap-2">
                     <svg
+                      aria-hidden="true"
                       className="w-4 h-4 text-ok shrink-0"
                       fill="none"
                       viewBox="0 0 24 24"
@@ -163,6 +165,7 @@ export default function PricingPage() {
                   </li>
                   <li className="flex items-center gap-2">
                     <svg
+                      aria-hidden="true"
                       className="w-4 h-4 text-ok shrink-0"
                       fill="none"
                       viewBox="0 0 24 24"
@@ -175,6 +178,7 @@ export default function PricingPage() {
                   </li>
                   <li className="flex items-center gap-2">
                     <svg
+                      aria-hidden="true"
                       className="w-4 h-4 text-ok shrink-0"
                       fill="none"
                       viewBox="0 0 24 24"
@@ -188,6 +192,7 @@ export default function PricingPage() {
                 </ul>
 
                 <button
+                  type="button"
                   onClick={() => void subscribe(p.plan_id)}
                   disabled={busy !== null}
                   className={`mt-8 w-full font-semibold py-3 rounded-md text-sm transition disabled:opacity-50 ${
