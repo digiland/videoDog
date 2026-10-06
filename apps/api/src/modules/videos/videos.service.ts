@@ -31,6 +31,10 @@ const UpdateVideoSchema = z.object({
   ppv_price_currency: z.enum(CURRENCY_CODES).optional().nullable(),
 });
 
+/** 8 MiB parts: above S3's 5 MiB minimum, small enough to retry cheaply on mobile data. */
+const PART_SIZE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
+
 /** Who is asking. `null` = anonymous. */
 export type Viewer = { id: string; role: string } | null;
 
@@ -93,6 +97,87 @@ export class VideosService {
       presigned_url: presignedUrl,
       key,
     };
+  }
+
+  // ─── Resumable multipart upload ──────────────────────────────────────────
+  //
+  // Creators upload over mobile data; a dropped connection should cost one 8 MiB part, not
+  // the whole file. The client PUTs each part to its presigned URL (in any order, retrying
+  // as needed), can ask which parts already landed, then calls complete. Completion lists
+  // the stored parts server-side, so the browser never needs to read ETag headers.
+
+  async startMultipartUpload(videoId: string, ownerId: string, body: unknown) {
+    const parsed = z
+      .object({
+        size_bytes: z.number().int().positive().max(MAX_UPLOAD_BYTES),
+        content_type: z
+          .string()
+          .regex(/^video\/[\w.+-]+$/)
+          .default('video/mp4'),
+      })
+      .safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    const video = await this.getOwned(videoId, ownerId);
+    if (video.state !== 'uploading') throw new ValidationError('Video is not awaiting upload');
+
+    const bucket = this.storage.videoBucketName;
+    const key = originalKey(videoId);
+    const uploadId = await this.storage.createMultipart(bucket, key, parsed.data.content_type);
+    const partCount = Math.ceil(parsed.data.size_bytes / PART_SIZE_BYTES);
+    return {
+      upload_id: uploadId,
+      part_size: PART_SIZE_BYTES,
+      part_count: partCount,
+      parts: await this.presignParts(
+        key,
+        uploadId,
+        Array.from({ length: partCount }, (_, i) => i + 1),
+      ),
+    };
+  }
+
+  /** Resume: which parts are stored, plus fresh URLs for the rest. */
+  async multipartStatus(videoId: string, ownerId: string, uploadId: string, partCount: number) {
+    await this.getOwned(videoId, ownerId);
+    const key = originalKey(videoId);
+    const stored = await this.storage.listParts(this.storage.videoBucketName, key, uploadId);
+    const have = new Set(stored.map((p) => p.partNumber));
+    const missing = Array.from({ length: partCount }, (_, i) => i + 1).filter((n) => !have.has(n));
+    return {
+      uploaded: stored.map((p) => ({ part_number: p.partNumber, size: p.size })),
+      parts: await this.presignParts(key, uploadId, missing),
+    };
+  }
+
+  async completeMultipartUpload(videoId: string, ownerId: string, uploadId: string) {
+    await this.getOwned(videoId, ownerId);
+    const bucket = this.storage.videoBucketName;
+    const key = originalKey(videoId);
+    const parts = await this.storage.listParts(bucket, key, uploadId);
+    if (parts.length === 0) throw new ValidationError('No parts uploaded');
+    await this.storage.completeMultipart(bucket, key, uploadId, parts);
+    return this.completeUpload(videoId, ownerId);
+  }
+
+  async abortMultipartUpload(videoId: string, ownerId: string, uploadId: string) {
+    await this.getOwned(videoId, ownerId);
+    await this.storage.abortMultipart(this.storage.videoBucketName, originalKey(videoId), uploadId);
+    return { ok: true };
+  }
+
+  private presignParts(key: string, uploadId: string, partNumbers: number[]) {
+    return Promise.all(
+      partNumbers.map(async (n) => ({
+        part_number: n,
+        url: await this.storage.presignPart(
+          this.storage.videoBucketName,
+          key,
+          uploadId,
+          n,
+          24 * 3600,
+        ),
+      })),
+    );
   }
 
   async completeUpload(videoId: string, ownerId: string) {

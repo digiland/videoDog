@@ -37,6 +37,55 @@ export class VideosController {
     return this.videos.createUploadSession(req.user.id, body);
   }
 
+  @Post(':id/upload/multipart')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async startMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+  ) {
+    return this.videos.startMultipartUpload(id, req.user.id, body);
+  }
+
+  @Get(':id/upload/multipart/:uploadId')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async multipartStatus(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+    @Query('part_count') partCount: string,
+  ) {
+    const n = Number.parseInt(partCount ?? '', 10);
+    if (!Number.isInteger(n) || n < 1 || n > 10_000) {
+      throw new ValidationError('part_count must be 1–10000');
+    }
+    return this.videos.multipartStatus(id, req.user.id, uploadId, n);
+  }
+
+  @Post(':id/upload/multipart/:uploadId/complete')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async completeMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+  ) {
+    return this.videos.completeMultipartUpload(id, req.user.id, uploadId);
+  }
+
+  @Post(':id/upload/multipart/:uploadId/abort')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async abortMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+  ) {
+    return this.videos.abortMultipartUpload(id, req.user.id, uploadId);
+  }
+
   @Post(':id/complete-upload')
   @UseGuards(RequireAuthGuard, RolesGuard)
   @Roles('creator', 'admin')

@@ -1,9 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import {
   S3Client,
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListPartsCommand,
   PutObjectCommand,
+  UploadPartCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream, createWriteStream, statSync } from 'fs';
@@ -113,6 +118,77 @@ export class StorageService {
         ContentLength: statSync(filePath).size,
         ContentType: contentType,
       }),
+    );
+  }
+
+  // ─── Multipart (resumable) uploads ─────────────────────────────────────────
+
+  async createMultipart(bucket: string, key: string, contentType: string): Promise<string> {
+    const res = await this.s3.send(
+      new CreateMultipartUploadCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+    );
+    if (!res.UploadId) throw new Error('No UploadId from storage');
+    return res.UploadId;
+  }
+
+  presignPart(bucket: string, key: string, uploadId: string, partNumber: number, ttl: number) {
+    return getSignedUrl(
+      this.s3,
+      new UploadPartCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        PartNumber: partNumber,
+      }),
+      { expiresIn: ttl },
+    );
+  }
+
+  /** Parts already stored — lets a client resume after a dropped connection. */
+  async listParts(bucket: string, key: string, uploadId: string) {
+    const parts: { partNumber: number; etag: string; size: number }[] = [];
+    let marker: string | undefined;
+    do {
+      const res = await this.s3.send(
+        new ListPartsCommand({
+          Bucket: bucket,
+          Key: key,
+          UploadId: uploadId,
+          PartNumberMarker: marker,
+        }),
+      );
+      for (const p of res.Parts ?? []) {
+        if (p.PartNumber && p.ETag)
+          parts.push({ partNumber: p.PartNumber, etag: p.ETag, size: p.Size ?? 0 });
+      }
+      marker = res.IsTruncated ? res.NextPartNumberMarker : undefined;
+    } while (marker);
+    return parts;
+  }
+
+  async completeMultipart(
+    bucket: string,
+    key: string,
+    uploadId: string,
+    parts: { partNumber: number; etag: string }[],
+  ): Promise<void> {
+    await this.s3.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: {
+          Parts: [...parts]
+            .sort((a, b) => a.partNumber - b.partNumber)
+            .map((p) => ({ PartNumber: p.partNumber, ETag: p.etag })),
+        },
+      }),
+    );
+  }
+
+  async abortMultipart(bucket: string, key: string, uploadId: string): Promise<void> {
+    await this.s3.send(
+      new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }),
     );
   }
 }
