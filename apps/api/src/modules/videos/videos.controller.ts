@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -15,9 +16,14 @@ import { RequireAuthGuard } from '../auth/require-auth.guard';
 import { Roles } from '../auth/roles.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import type { AuthenticatedRequest } from '../auth/jwt.guard';
-import { VideosService } from './videos.service';
+import { VideosService, type Viewer } from './videos.service';
 import { z } from 'zod';
 import { ValidationError } from '../auth/errors';
+
+/** JwtGuard attaches `{ id: '' }` for anonymous requests. */
+function viewerOf(req: AuthenticatedRequest): Viewer {
+  return req.user?.id ? { id: req.user.id, role: req.user.role } : null;
+}
 
 @Controller('videos')
 @UseGuards(JwtGuard)
@@ -76,18 +82,19 @@ export class VideosController {
   }
 
   @Get(':id')
-  async findOne(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    return this.videos.findById(id, req.user?.id || undefined);
+  async findOne(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.findById(id, viewerOf(req));
   }
 
   @Get(':id/playlist')
-  async playlist(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    const user = req.user?.id ? { id: req.user.id, preferredDisplayCurrency: 'USD' } : null;
-    return this.videos.getSignedPlaylistUrl(id, user);
+  async playlist(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    const apiBase = process.env.PUBLIC_API_BASE ?? `${req.protocol}://${req.get('host')}`;
+    return this.videos.getSignedPlaylistUrl(id, viewerOf(req), apiBase);
   }
 
   @Get(':id/captions')
-  async listCaptions(@Param('id') id: string) {
+  async listCaptions(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    await this.videos.getVisible(id, viewerOf(req));
     return { items: await this.videos.listCaptions(id) };
   }
 

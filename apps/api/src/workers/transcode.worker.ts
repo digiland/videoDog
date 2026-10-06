@@ -1,165 +1,131 @@
 import { Logger } from '@nestjs/common';
-import { Worker, Queue } from 'bullmq';
+import { Worker, type Job } from 'bullmq';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { eq } from 'drizzle-orm';
 import type { Db } from '../db/db.module';
 import type { StorageService } from '../storage/storage.service';
-import { originalKey, masterPlaylistKey, renditionPlaylistKey } from '@streamzw/shared';
+import {
+  masterPlaylistKey,
+  originalKey,
+  renditionPlaylistKey,
+  thumbnailKey,
+} from '@streamzw/shared';
 import { videos, renditions } from '../db/schema';
-import { eq } from 'drizzle-orm';
 import { bullmqConnection } from '../common/bullmq-connection';
+import { extractThumbnail, ladderFor, listFiles, probe, transcodeToHls } from './transcode';
 
 const logger = new Logger('TranscodeWorker');
 
-const RENDITIONS = [
-  { height: 240, bitrate: 400, preset: 'ultrafast' },
-  { height: 480, bitrate: 800, preset: 'fast' },
-  { height: 720, bitrate: 2000, preset: 'fast' },
-];
+export const TRANSCODE_ATTEMPTS = 3;
 
 export function createTranscodeWorker(redisUrl: string, db: Db, storage: StorageService): Worker {
-  const conn = bullmqConnection(redisUrl);
-  const thumbnailQueue = new Queue('thumbnail.extract', { connection: conn });
-
   return new Worker(
     'transcode',
-    async (job) => {
-      const { videoId } = job.data as { videoId: string };
-      logger.log({ videoId }, 'Starting transcode');
-
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `transcode-${videoId}-`));
-
+    async (job: Job<{ videoId: string }>) => {
+      const { videoId } = job.data;
       try {
-        // 1. Download original
-        const inputPath = path.join(tmpDir, 'original.mp4');
-        const originalBuf = await storage.download(storage.videoBucketName, originalKey(videoId));
-        fs.writeFileSync(inputPath, originalBuf);
-
-        // 2. FFmpeg transcode to HLS per rendition
-        const fluent = await import('fluent-ffmpeg');
-        const ffmpeg = fluent.default;
-
-        // Probe for duration
-        let durationSeconds = 0;
-        try {
-          durationSeconds = await new Promise<number>((resolve, reject) => {
-            ffmpeg(inputPath).ffprobe((err, meta) => {
-              if (err) {
-                reject(err);
-                return;
-              }
-              resolve(Math.floor(meta.format.duration ?? 0));
-            });
-          });
-        } catch {
-          logger.warn({ videoId }, 'ffprobe failed');
-        }
-
-        const uploadedKeys: string[] = [];
-        const masterLines: string[] = ['#EXTM3U'];
-
-        for (const r of RENDITIONS) {
-          const outDir = path.join(tmpDir, `${r.height}p`);
-          fs.mkdirSync(outDir, { recursive: true });
-          const playlistPath = path.join(outDir, 'index.m3u8');
-
-          await new Promise<void>((resolve, reject) => {
-            ffmpeg(inputPath)
-              .outputOptions([
-                `-vf scale=-2:${r.height}`,
-                `-b:v ${r.bitrate}k`,
-                '-c:v libx264',
-                `-preset ${r.preset}`,
-                '-c:a aac',
-                '-b:a 128k',
-                '-hls_time 6',
-                '-hls_playlist_type vod',
-                `-hls_segment_filename ${outDir}/seg%03d.ts`,
-              ])
-              .output(playlistPath)
-              .on('end', () => resolve())
-              .on('error', reject)
-              .run();
-          });
-
-          // Upload all files in outDir
-          const segFiles = fs.readdirSync(outDir);
-          for (const f of segFiles) {
-            const filePath = path.join(outDir, f);
-            const s3Key =
-              f === 'index.m3u8'
-                ? renditionPlaylistKey(videoId, r.height)
-                : `videos/${videoId}/${r.height}p/${f}`;
-            const buf = fs.readFileSync(filePath);
-            const ct = f.endsWith('.m3u8') ? 'application/x-mpegURL' : 'video/MP2T';
-            await storage.uploadBuffer(storage.videoBucketName, s3Key, buf, ct);
-            uploadedKeys.push(s3Key);
-          }
-
-          // Write rendition to DB
-          await db
-            .insert(renditions)
-            .values({
-              videoId,
-              height: r.height,
-              bitrateKbps: r.bitrate,
-              key: renditionPlaylistKey(videoId, r.height),
-              ready: true,
-            })
-            .onConflictDoNothing();
-
-          masterLines.push(
-            `#EXT-X-STREAM-INF:BANDWIDTH=${r.bitrate * 1000},RESOLUTION=${r.height === 240 ? '426x240' : r.height === 480 ? '854x480' : '1280x720'}`,
-            `${r.height}p/index.m3u8`,
-          );
-        }
-
-        // 3. Upload master playlist
-        const masterContent = masterLines.join('\n');
-        const masterKey = masterPlaylistKey(videoId);
-        await storage.uploadBuffer(
-          storage.videoBucketName,
-          masterKey,
-          Buffer.from(masterContent),
-          'application/x-mpegURL',
-        );
-
-        // 4. Update video state
-        await db
-          .update(videos)
-          .set({
-            state: 'ready',
-            durationSeconds,
-            hlsPlaylistKey: masterKey,
-            updatedAt: new Date(),
-          })
-          .where(eq(videos.id, videoId));
-
-        // 5. Enqueue thumbnail extraction
-        await thumbnailQueue.add(
-          'thumbnail.extract',
-          { videoId },
-          {
-            jobId: `thumb-${videoId}`,
-          },
-        );
-
-        logger.log({ videoId }, 'Transcode complete');
+        await transcodeVideo(db, storage, videoId);
       } catch (err) {
-        logger.error({ videoId, err }, 'Transcode failed');
-        await db
-          .update(videos)
-          .set({ state: 'failed', updatedAt: new Date() })
-          .where(eq(videos.id, videoId));
+        logger.error({ videoId, attempt: job.attemptsMade + 1, err }, 'Transcode failed');
+        // Only give up once BullMQ has no retries left; until then the video stays `processing`.
+        if (job.attemptsMade + 1 >= (job.opts.attempts ?? TRANSCODE_ATTEMPTS)) {
+          await db
+            .update(videos)
+            .set({ state: 'failed', updatedAt: new Date() })
+            .where(eq(videos.id, videoId));
+        }
         throw err;
-      } finally {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     },
-    {
-      connection: conn,
-      concurrency: 2,
-    },
+    { connection: bullmqConnection(redisUrl), concurrency: 1 },
   );
+}
+
+/**
+ * Original → HLS ladder (240/480/720/1080p, never above the source) + poster frame.
+ * The master playlist is uploaded last, so a video only becomes playable once every
+ * rendition it references exists.
+ */
+export async function transcodeVideo(db: Db, storage: StorageService, videoId: string) {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `transcode-${videoId}-`));
+  try {
+    const inputPath = path.join(tmpDir, 'original');
+    await storage.downloadToFile(storage.videoBucketName, originalKey(videoId), inputPath);
+
+    const meta = await probe(inputPath);
+    const ladder = ladderFor(meta.height);
+    logger.log({ videoId, ...meta, ladder: ladder.map((r) => r.height) }, 'Transcoding');
+
+    const outDir = path.join(tmpDir, 'hls');
+    fs.mkdirSync(outDir);
+    await transcodeToHls(inputPath, outDir, ladder, meta.hasAudio);
+
+    const files = listFiles(outDir).filter((f) => f !== 'master.m3u8');
+    for (const f of files) {
+      await storage.uploadFile(
+        storage.videoBucketName,
+        `videos/${videoId}/${f}`,
+        path.join(outDir, f),
+        f.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t',
+      );
+    }
+    const masterKey = masterPlaylistKey(videoId);
+    await storage.uploadFile(
+      storage.videoBucketName,
+      masterKey,
+      path.join(outDir, 'master.m3u8'),
+      'application/vnd.apple.mpegurl',
+    );
+
+    for (const r of ladder) {
+      await db
+        .insert(renditions)
+        .values({
+          videoId,
+          height: r.height,
+          bitrateKbps: r.videoKbps + (meta.hasAudio ? r.audioKbps : 0),
+          key: renditionPlaylistKey(videoId, r.height),
+          ready: true,
+        })
+        .onConflictDoUpdate({
+          target: [renditions.videoId, renditions.height],
+          set: { ready: true, bitrateKbps: r.videoKbps + (meta.hasAudio ? r.audioKbps : 0) },
+        });
+    }
+
+    // Poster frame, unless the creator already uploaded their own. Non-fatal.
+    const [current] = await db
+      .select({ thumbnailKey: videos.thumbnailKey })
+      .from(videos)
+      .where(eq(videos.id, videoId));
+    let thumbKey = current?.thumbnailKey ?? null;
+    if (!thumbKey) {
+      try {
+        const thumbPath = path.join(tmpDir, 'thumb.jpg');
+        await extractThumbnail(inputPath, thumbPath, meta.durationSeconds);
+        thumbKey = thumbnailKey(videoId);
+        await storage.uploadFile(storage.thumbBucketName, thumbKey, thumbPath, 'image/jpeg');
+      } catch (err) {
+        logger.warn({ videoId, err }, 'Thumbnail extraction failed');
+        thumbKey = null;
+      }
+    }
+
+    await db
+      .update(videos)
+      .set({
+        state: 'ready',
+        durationSeconds: meta.durationSeconds,
+        hlsPlaylistKey: masterKey,
+        thumbnailKey: thumbKey,
+        updatedAt: new Date(),
+      })
+      .where(eq(videos.id, videoId));
+
+    logger.log({ videoId }, 'Transcode complete');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 }

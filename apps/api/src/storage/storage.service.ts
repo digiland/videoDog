@@ -6,6 +6,9 @@ import {
   PutObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createReadStream, createWriteStream, statSync } from 'fs';
+import { pipeline } from 'stream/promises';
+import type { Readable } from 'stream';
 
 @Injectable()
 export class StorageService {
@@ -24,6 +27,11 @@ export class StorageService {
         secretAccessKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
       },
       forcePathStyle: true, // MinIO requires path-style
+      // AWS SDK ≥3.729 adds CRC checksums by default, sending streamed uploads as
+      // `aws-chunked` with a trailer. S3-compatible stores (MinIO/RustFS versions, test
+      // servers) may store those framing bytes inside the object, corrupting video files.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
     });
     this.videoBucket = process.env.MINIO_BUCKET_VIDEOS ?? 'streamzw-videos';
     this.thumbBucket = process.env.MINIO_BUCKET_THUMBS ?? 'streamzw-thumbs';
@@ -81,5 +89,30 @@ export class StorageService {
       chunks.push(chunk as Uint8Array);
     }
     return Buffer.concat(chunks);
+  }
+
+  /** Stream an object to disk without holding it in memory (originals can be gigabytes). */
+  async downloadToFile(bucket: string, key: string, filePath: string): Promise<void> {
+    const result = await this.s3.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+    if (!result.Body) throw new Error(`Empty object: ${bucket}/${key}`);
+    await pipeline(result.Body as Readable, createWriteStream(filePath));
+  }
+
+  /** Stream a file from disk to the bucket. */
+  async uploadFile(
+    bucket: string,
+    key: string,
+    filePath: string,
+    contentType: string,
+  ): Promise<void> {
+    await this.s3.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Body: createReadStream(filePath),
+        ContentLength: statSync(filePath).size,
+        ContentType: contentType,
+      }),
+    );
   }
 }

@@ -41,8 +41,7 @@ export class SubscriptionsService {
         let displayPrice = baseMoney.toJSON();
         if (displayCurrency !== plan.baseCurrency) {
           try {
-            const rate = await this.fx.rate(plan.baseCurrency as CurrencyCode, displayCurrency);
-            const converted = baseMoney.convert(rate, displayCurrency);
+            const { converted } = await this.fx.convert(baseMoney, displayCurrency);
             displayPrice = converted.toJSON();
           } catch {
             // Fall back to base price on FX error
@@ -94,9 +93,9 @@ export class SubscriptionsService {
               return r.usd;
             })();
     } else {
-      const rate = await this.fx.rate(plan.baseCurrency as CurrencyCode, paymentCurrency);
-      fxRateId = rate.id === 'identity' ? null : rate.id;
-      chargedAmount = baseMoney.convert(rate, paymentCurrency);
+      const { converted, fxRate } = await this.fx.convert(baseMoney, paymentCurrency);
+      fxRateId = fxRate.id === 'identity' ? null : fxRate.id;
+      chargedAmount = converted;
       const usdResult = await this.fx.convertToUsd(chargedAmount);
       usdEquiv = usdResult.usd;
       if (!fxRateId && usdResult.fxRate.id !== 'identity') fxRateId = usdResult.fxRate.id;

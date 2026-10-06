@@ -1,8 +1,8 @@
 import { Logger } from '@nestjs/common';
 import { Worker } from 'bullmq';
-import { sql, and, gte, lt } from 'drizzle-orm';
+import { sql, and, eq, gte, lt } from 'drizzle-orm';
 import type { Db } from '../db/db.module';
-import { watchSessions, watchMinutesDaily } from '../db/schema';
+import { videos, watchSessions, watchMinutesDaily } from '../db/schema';
 import { bullmqConnection } from '../common/bullmq-connection';
 
 const logger = new Logger('WatchAggregateWorker');
@@ -27,7 +27,15 @@ export function createWatchAggregateWorker(redisUrl: string, db: Db): Worker {
           minutes: sql<string>`SUM(minutes_watched)`,
         })
         .from(watchSessions)
-        .where(and(gte(watchSessions.startedAt, dayStart), lt(watchSessions.startedAt, dayEnd)))
+        .innerJoin(videos, eq(videos.id, watchSessions.videoId))
+        .where(
+          and(
+            gte(watchSessions.startedAt, dayStart),
+            lt(watchSessions.startedAt, dayEnd),
+            // Creators watching their own videos don't earn premium-pool minutes.
+            sql`${watchSessions.userId} IS DISTINCT FROM ${videos.ownerId}`,
+          ),
+        )
         .groupBy(watchSessions.videoId);
 
       for (const row of rows) {

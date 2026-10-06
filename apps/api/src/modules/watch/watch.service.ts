@@ -2,7 +2,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, sql } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { watchSessions } from '../../db/schema';
-import { ResourceNotFoundError } from '../auth/errors';
+import { AuthForbiddenError, ResourceNotFoundError } from '../auth/errors';
+import { VideosService } from '../videos/videos.service';
+import { AccessService } from '../videos/access.service';
 
 const HEARTBEAT_MIN_MS = 10_000; // 10s
 const HEARTBEAT_MAX_MS = 25_000; // 25s (15s target ± buffer)
@@ -10,16 +12,33 @@ const HEARTBEATS_PER_MINUTE = 4;
 
 @Injectable()
 export class WatchService {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    private readonly videos: VideosService,
+    private readonly access: AccessService,
+  ) {}
 
+  /**
+   * Start counting watch time. Only for a viewer who may actually watch the video
+   * (Invariant §9 via AccessService), so nobody can farm premium-pool minutes on videos
+   * they can't play. A signed-in viewer has one live stream: starting a session ends their
+   * others, so parallel tabs or scripts can't multiply minutes.
+   */
   async startSession(userId: string | null, videoId: string): Promise<{ session_id: string }> {
-    const [session] = await this.db
-      .insert(watchSessions)
-      .values({
-        userId,
-        videoId,
-      })
-      .returning();
+    const viewer = userId ? { id: userId, role: 'viewer' } : null;
+    const video = await this.videos.getVisible(videoId, viewer);
+    const user = userId ? { id: userId, preferredDisplayCurrency: 'USD' } : null;
+    const access = await this.access.checkAccess(user, video);
+    if (!access.ok) throw new AuthForbiddenError();
+
+    if (userId) {
+      await this.db
+        .update(watchSessions)
+        .set({ ended: true })
+        .where(and(eq(watchSessions.userId, userId), eq(watchSessions.ended, false)));
+    }
+
+    const [session] = await this.db.insert(watchSessions).values({ userId, videoId }).returning();
     return { session_id: session!.id };
   }
 

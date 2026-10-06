@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { DB, type Db } from '../../db/db.module';
 import { captions, users as schema_users, videos, purchases } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
+import { PlaybackService } from './playback.service';
 import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
 import { originalKey, Money } from '@streamzw/shared';
@@ -29,6 +30,11 @@ const UpdateVideoSchema = z.object({
   ppv_price_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']).optional().nullable(),
 });
 
+/** Who is asking. `null` = anonymous. */
+export type Viewer = { id: string; role: string } | null;
+
+const AccessModeSchema = z.enum(['free', 'ppv', 'premium', 'premium_buyable']);
+
 @Injectable()
 export class VideosService {
   private readonly transcodeQueue: Queue;
@@ -38,6 +44,7 @@ export class VideosService {
     private readonly storage: StorageService,
     private readonly access: AccessService,
     private readonly fx: FxService,
+    private readonly playback: PlaybackService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.transcodeQueue = new Queue('transcode', {
@@ -163,18 +170,9 @@ export class VideosService {
     return updated!;
   }
 
-  async findById(videoId: string, userId?: string) {
-    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
-
-    if (!video) throw new ResourceNotFoundError('Video');
-
-    let accessCheckResult = null;
-    if (userId) {
-      const user = { id: userId, preferredDisplayCurrency: 'USD' };
-      accessCheckResult = await this.access.checkAccess(user, video);
-    } else {
-      accessCheckResult = await this.access.checkAccess(null, video);
-    }
+  async findById(videoId: string, viewer: Viewer) {
+    const video = await this.getVisible(videoId, viewer);
+    const accessCheckResult = await this.access.checkAccess(await this.accessUser(viewer), video);
 
     const creator = await this.db
       .select({
@@ -208,7 +206,6 @@ export class VideosService {
       in_premium_pool: v.inPremiumPool,
       state: v.state,
       duration_seconds: v.durationSeconds,
-      hls_playlist_key: v.hlsPlaylistKey,
       thumbnail_key: v.thumbnailKey,
       thumbnail_url: await this.thumbnailUrl(v.thumbnailKey),
       published_at: v.publishedAt,
@@ -242,19 +239,35 @@ export class VideosService {
     }
 
     if (filters.mode) {
-      conditions.push(
-        eq(videos.accessMode, filters.mode as 'free' | 'ppv' | 'premium' | 'premium_buyable'),
-      );
+      const mode = AccessModeSchema.safeParse(filters.mode);
+      if (!mode.success)
+        throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
+      conditions.push(eq(videos.accessMode, mode.data));
     }
     if (filters.creatorId) {
       conditions.push(eq(videos.ownerId, filters.creatorId));
+    }
+
+    // Keyset pagination on (sort column, id). Public lists sort by publish time; a creator's
+    // own list (which includes drafts with no publish time) sorts by creation time.
+    const sortCol = filters.includeUnpublished ? videos.createdAt : videos.publishedAt;
+    if (filters.cursor) {
+      const [anchor] = await this.db
+        .select({ id: videos.id, at: sortCol })
+        .from(videos)
+        .where(eq(videos.id, filters.cursor))
+        .limit(1);
+      if (!anchor?.at) throw new ValidationError('Invalid cursor');
+      conditions.push(
+        or(lt(sortCol, anchor.at), and(eq(sortCol, anchor.at), lt(videos.id, anchor.id)))!,
+      );
     }
 
     const rows = await this.db
       .select()
       .from(videos)
       .where(and(...conditions))
-      .orderBy(desc(videos.publishedAt))
+      .orderBy(desc(sortCol), desc(videos.id))
       .limit(limit + 1);
 
     const hasMore = rows.length > limit;
@@ -288,27 +301,14 @@ export class VideosService {
     return { items, next_cursor };
   }
 
-  async getSignedPlaylistUrl(
-    videoId: string,
-    user: { id: string; preferredDisplayCurrency: string } | null,
-  ) {
-    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
+  async getSignedPlaylistUrl(videoId: string, viewer: Viewer, apiBase: string) {
+    const video = await this.getVisible(videoId, viewer);
+    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('Playable video');
 
-    if (!video) throw new ResourceNotFoundError('Video');
-    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('HLS playlist');
-
-    const access = await this.access.checkAccess(user, video);
+    const access = await this.access.checkAccess(await this.accessUser(viewer), video);
     if (!access.ok) return { access_denied: true, paywall: access.paywall };
 
-    // Pass-through full URLs (used by test seed data); otherwise treat as a
-    // storage object key and sign a 5-minute GET.
-    const url = /^https?:\/\//i.test(video.hlsPlaylistKey)
-      ? video.hlsPlaylistKey
-      : await this.storage.getPresignedGetUrl(
-          this.storage.videoBucketName,
-          video.hlsPlaylistKey,
-          300,
-        );
+    const grant = await this.playback.grant(video.id, video.hlsPlaylistKey, apiBase);
 
     const captionRows = await this.db
       .select()
@@ -322,11 +322,34 @@ export class VideosService {
         label: c.label,
         kind: c.kind,
         is_default: c.isDefault,
-        url: await this.storage.getPresignedGetUrl(this.storage.videoBucketName, c.key, 300),
+        url: await this.playback.captionUrl(c.key),
       })),
     );
 
-    return { url, captions: signedCaptions };
+    return { ...grant, captions: signedCaptions };
+  }
+
+  /**
+   * Load a video the viewer may see at all: published videos for everyone; anything else
+   * only for its owner or an admin. Others get 404, so drafts don't leak.
+   */
+  async getVisible(videoId: string, viewer: Viewer) {
+    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
+    if (!video) throw new ResourceNotFoundError('Video');
+    const privileged = viewer && (viewer.id === video.ownerId || viewer.role === 'admin');
+    if (video.state !== 'published' && !privileged) throw new ResourceNotFoundError('Video');
+    return video;
+  }
+
+  /** The user shape AccessService needs, with their display currency for paywall quotes. */
+  private async accessUser(viewer: Viewer) {
+    if (!viewer) return null;
+    const [u] = await this.db
+      .select({ id: schema_users.id, currency: schema_users.preferredDisplayCurrency })
+      .from(schema_users)
+      .where(eq(schema_users.id, viewer.id))
+      .limit(1);
+    return u ? { id: u.id, preferredDisplayCurrency: u.currency } : null;
   }
 
   async listCaptions(videoId: string) {
@@ -420,7 +443,7 @@ export class VideosService {
     const dto = parsed.data;
 
     const [video] = await this.db.select().from(videos).where(eq(videos.id, dto.video_id)).limit(1);
-    if (!video) throw new ResourceNotFoundError('Video');
+    if (!video || video.state !== 'published') throw new ResourceNotFoundError('Video');
 
     if (video.accessMode !== 'ppv' && video.accessMode !== 'premium_buyable') {
       throw new ValidationError('Video is not available for individual purchase');
@@ -460,9 +483,9 @@ export class VideosService {
               return r.usd;
             })();
     } else {
-      const rate = await this.fx.rate(video.ppvPriceCurrency as CurrencyCode, paymentCurrency);
-      fxRateId = rate.id === 'identity' ? null : rate.id;
-      chargedAmount = baseMoney.convert(rate, paymentCurrency);
+      const { converted, fxRate } = await this.fx.convert(baseMoney, paymentCurrency);
+      fxRateId = fxRate.id === 'identity' ? null : fxRate.id;
+      chargedAmount = converted;
       const usdResult = await this.fx.convertToUsd(chargedAmount);
       usdEquiv = usdResult.usd;
       if (!fxRateId && usdResult.fxRate.id !== 'identity') fxRateId = usdResult.fxRate.id;

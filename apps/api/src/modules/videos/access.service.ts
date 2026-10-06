@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, gt } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
+import { FxService } from '../fx/fx.service';
 import { purchases, subscriptions, subscriptionPlans } from '../../db/schema';
 import { Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
@@ -16,16 +17,20 @@ type VideoForAccess = {
   ownerId?: string;
 };
 
+type MoneyJson = ReturnType<Money['toJSON']>;
+
 export interface PlanQuote {
   plan_id: string;
   code: string;
-  price: ReturnType<Money['toJSON']>;
+  price: MoneyJson;
+  /** Price converted to the viewer's display currency. Render-only (§3.5); absent without a rate. */
+  display_price?: MoneyJson;
 }
 
 export type PaywallPayload = {
   reasons: ('not_subscribed' | 'not_purchased')[];
   options: {
-    buy?: { price: ReturnType<Money['toJSON']> };
+    buy?: { price: MoneyJson; display_price?: MoneyJson };
     subscribe?: { plans: PlanQuote[] };
   };
 };
@@ -38,7 +43,10 @@ export type AccessResult = { ok: true } | { ok: false; paywall: PaywallPayload }
  */
 @Injectable()
 export class AccessService {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(
+    @Inject(DB) private readonly db: Db,
+    private readonly fx: FxService,
+  ) {}
 
   async checkAccess(user: User | null, video: VideoForAccess): Promise<AccessResult> {
     if (user && video.ownerId === user.id) return { ok: true };
@@ -109,7 +117,8 @@ export class AccessService {
           BigInt(video.ppvPriceMinorUnits),
           video.ppvPriceCurrency as CurrencyCode,
         );
-        options.buy = { price: price.toJSON() };
+        const display = await this.displayPrice(price, displayCurrency);
+        options.buy = { price: price.toJSON(), ...(display && { display_price: display }) };
       }
     }
 
@@ -128,14 +137,26 @@ export class AccessService {
       .from(subscriptionPlans)
       .where(eq(subscriptionPlans.active, true));
 
-    return rows.map((p) => {
-      const price = new Money(BigInt(p.basePriceMinorUnits), p.baseCurrency as CurrencyCode);
-      return {
-        plan_id: p.id,
-        code: p.code,
-        price: price.toJSON(),
-        display_currency: displayCurrency,
-      };
-    });
+    return Promise.all(
+      rows.map(async (p) => {
+        const price = new Money(BigInt(p.basePriceMinorUnits), p.baseCurrency as CurrencyCode);
+        const display = await this.displayPrice(price, displayCurrency);
+        return {
+          plan_id: p.id,
+          code: p.code,
+          price: price.toJSON(),
+          ...(display && { display_price: display }),
+        };
+      }),
+    );
+  }
+
+  private async displayPrice(price: Money, currency: CurrencyCode): Promise<MoneyJson | null> {
+    if (price.currency === currency) return null;
+    try {
+      return (await this.fx.convert(price, currency)).converted.toJSON();
+    } catch {
+      return null; // no rate: show the real price only
+    }
   }
 }

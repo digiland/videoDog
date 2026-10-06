@@ -7,7 +7,6 @@ import { DB, type Db } from './db/db.module';
 import { StorageService } from './storage/storage.service';
 import { LedgerService } from './modules/payments/ledger.service';
 import { createTranscodeWorker } from './workers/transcode.worker';
-import { createThumbnailWorker } from './workers/thumbnail.worker';
 import { createWatchAggregateWorker } from './workers/watch-aggregate.worker';
 import { createPremiumPoolWorker } from './workers/premium-pool.worker';
 
@@ -26,7 +25,6 @@ async function bootstrap(): Promise<void> {
   const ledger = app.get(LedgerService);
   const workers = [
     createTranscodeWorker(redisUrl, db, storage),
-    createThumbnailWorker(redisUrl, db, storage),
     createWatchAggregateWorker(redisUrl, db),
     createPremiumPoolWorker(redisUrl, db, ledger),
   ];
