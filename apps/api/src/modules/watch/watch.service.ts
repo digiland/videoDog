@@ -1,10 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { watchSessions } from '../../db/schema';
 import { AuthForbiddenError, ResourceNotFoundError } from '../auth/errors';
 import { VideosService } from '../videos/videos.service';
 import { AccessService } from '../videos/access.service';
+import { WatchRepository } from './watch.repository';
 
 const HEARTBEAT_MIN_MS = 10_000; // 10s
 const HEARTBEAT_MAX_MS = 25_000; // 25s (15s target ± buffer)
@@ -16,6 +17,7 @@ export class WatchService {
     @Inject(DB) private readonly db: Db,
     private readonly videos: VideosService,
     private readonly access: AccessService,
+    private readonly repo: WatchRepository,
   ) {}
 
   /**
@@ -54,39 +56,15 @@ export class WatchService {
     const conditions = [eq(watchSessions.id, sessionId), eq(watchSessions.ended, false)];
     if (userId) conditions.push(eq(watchSessions.userId, userId));
 
-    const inWindow = sql`${watchSessions.lastHeartbeat} BETWEEN now() - make_interval(secs => ${HEARTBEAT_MAX_MS / 1000}) AND now() - make_interval(secs => ${HEARTBEAT_MIN_MS / 1000})`;
+    const where = and(...conditions)!;
+    const min = HEARTBEAT_MIN_MS / 1000;
+    const max = HEARTBEAT_MAX_MS / 1000;
 
-    const counted = await this.db
-      .update(watchSessions)
-      .set({
-        lastHeartbeat: sql`now()`,
-        heartbeatCount: sql`${watchSessions.heartbeatCount} + 1`,
-        minutesWatched: sql`(${watchSessions.heartbeatCount} + 1) / ${HEARTBEATS_PER_MINUTE}`,
-      })
-      .where(and(...conditions, inWindow))
-      .returning({ id: watchSessions.id });
-    if (counted.length > 0) return;
-
-    // Too early: ignore entirely (keeps the anchor so spamming can't shift the window).
+    if (await this.repo.countHeartbeat(where, min, max, HEARTBEATS_PER_MINUTE)) return;
+    // Too early: ignored (keeps the anchor so spamming can't shift the window).
     // Too late (a pause or dropped connection): re-anchor without counting.
-    const reanchored = await this.db
-      .update(watchSessions)
-      .set({ lastHeartbeat: sql`now()` })
-      .where(
-        and(
-          ...conditions,
-          sql`${watchSessions.lastHeartbeat} < now() - make_interval(secs => ${HEARTBEAT_MAX_MS / 1000})`,
-        ),
-      )
-      .returning({ id: watchSessions.id });
-    if (reanchored.length > 0) return;
-
-    const [exists] = await this.db
-      .select({ id: watchSessions.id })
-      .from(watchSessions)
-      .where(and(...conditions))
-      .limit(1);
-    if (!exists) throw new ResourceNotFoundError('Watch session');
+    if (await this.repo.reanchorIfStale(where, max)) return;
+    if (!(await this.repo.exists(where))) throw new ResourceNotFoundError('Watch session');
   }
 
   async endSession(sessionId: string, userId: string | null): Promise<void> {

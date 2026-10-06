@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { connect, hasDb, makeUser, makeVideo, services } from '../../test/harness';
 import { WatchService } from './watch.service';
+import { WatchRepository } from './watch.repository';
 import { VideosService } from '../videos/videos.service';
 import { AccessService } from '../videos/access.service';
 import { watchSessions } from '../../db/schema';
@@ -18,8 +19,15 @@ describe.skipIf(!hasDb)('watch heartbeats (integration)', () => {
     ({ db, close } = connect());
     const access = new AccessService(db, services(db).fx);
     // getVisible only reads the DB; the other VideosService dependencies aren't touched.
-    const videos = new VideosService(db, {} as never, access, services(db).fx, {} as never);
-    watch = new WatchService(db, videos, access);
+    const videos = new VideosService(
+      db,
+      {} as never,
+      access,
+      services(db).fx,
+      {} as never,
+      {} as never,
+    );
+    watch = new WatchService(db, videos, access, new WatchRepository(db));
   });
   afterAll(async () => close());
 

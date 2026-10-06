@@ -1,14 +1,15 @@
-import { Controller, Get, Inject, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { JwtGuard } from '../auth/jwt.guard';
-import { DB, type Db } from '../../db/db.module';
-import { sql } from 'drizzle-orm';
-import { videos } from '../../db/schema';
-import { and, eq } from 'drizzle-orm';
+import { VideosService } from '../videos/videos.service';
 
+/**
+ * Postgres full-text search over published videos. Same serialisation as /videos, so no
+ * internal fields (storage keys) leak and thumbnails are signed.
+ */
 @Controller('search')
 @UseGuards(JwtGuard)
 export class SearchController {
-  constructor(@Inject(DB) private readonly db: Db) {}
+  constructor(private readonly videos: VideosService) {}
 
   @Get()
   async search(
@@ -16,42 +17,11 @@ export class SearchController {
     @Query('mode') mode?: string,
     @Query('limit') limit?: string,
   ) {
-    const maxLimit = Math.min(parseInt(limit ?? '20', 10), 100);
-
-    if (!q || q.trim().length === 0) {
-      // Return recent published videos
-      const conditions = [eq(videos.state, 'published')];
-      if (mode) {
-        conditions.push(
-          eq(videos.accessMode, mode as 'free' | 'ppv' | 'premium' | 'premium_buyable'),
-        );
-      }
-      const rows = await this.db
-        .select()
-        .from(videos)
-        .where(and(...conditions))
-        .limit(maxLimit);
-      return { results: rows, total: rows.length };
-    }
-
-    // Full-text search via Postgres tsvector
-    const conditions = [
-      eq(videos.state, 'published'),
-      sql`${videos}.search_doc @@ plainto_tsquery('english', ${q})`,
-    ];
-    if (mode) {
-      conditions.push(
-        eq(videos.accessMode, mode as 'free' | 'ppv' | 'premium' | 'premium_buyable'),
-      );
-    }
-
-    const rows = await this.db
-      .select()
-      .from(videos)
-      .where(and(...conditions))
-      .orderBy(sql`ts_rank(${videos}.search_doc, plainto_tsquery('english', ${q})) DESC`)
-      .limit(maxLimit);
-
-    return { results: rows, total: rows.length };
+    const { items } = await this.videos.list({
+      q: q?.trim() || undefined,
+      mode,
+      limit: limit ? Number.parseInt(limit, 10) : undefined,
+    });
+    return { items, total: items.length };
   }
 }

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, gt, inArray, lt } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { DB, type Db, type Tx } from '../../db/db.module';
 import { payments, purchases, subscriptionPlans, subscriptions, videos } from '../../db/schema';
@@ -8,7 +8,9 @@ import { FxService } from '../fx/fx.service';
 import { Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
-import { EcocashUsdClient, EcocashZwgClient } from '../../integrations/ecocash';
+import { EcocashClient } from '../../integrations/ecocash';
+import { PaystackClient } from '../../integrations/paystack';
+import type { ChargeResult, PaymentRail, ProviderStatus } from '../../integrations/rail';
 import { z } from 'zod';
 
 const E164 = /^\+[1-9]\d{1,14}$/;
@@ -42,27 +44,37 @@ const EcocashWebhookSchema = z.object({
   status: z.string().min(1),
 });
 
-/** Currency each live provider rail settles in. ZIPIT / Paystack are not wired up yet. */
-const PROVIDER_CURRENCY: Partial<Record<string, CurrencyCode>> = {
-  ecocash_usd: 'USD',
-  ecocash_zwg: 'ZWG',
-};
+const PaystackWebhookSchema = z.object({
+  event: z.string(),
+  data: z.object({
+    reference: z.string().min(1),
+    status: z.string().optional(),
+    amount: z.number().int().nonnegative(),
+    currency: z.string().length(3),
+  }),
+});
 
 const PLATFORM_SHARE = 0.3;
 const TIP_PLATFORM_SHARE = 0.1;
 
+/** Don't ask the provider about a payment younger than this — give the webhook a chance. */
+const RECONCILE_AFTER_MS = 20_000;
+
 type Payment = typeof payments.$inferSelect;
+type Provider = Payment['provider'];
 type ChargeQuote = {
   amount: Money;
   usdEquivalent: bigint;
   fxRateId: string | null;
 };
+type Outcome = { status: ProviderStatus; providerRef?: string; raw?: unknown };
 
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
-  private readonly ecocashUsd = new EcocashUsdClient();
-  private readonly ecocashZwg = new EcocashZwgClient();
+  private readonly ecocashUsd = new EcocashClient('USD');
+  private readonly ecocashZwg = new EcocashClient('ZWG');
+  private readonly paystack = new PaystackClient();
 
   constructor(
     @Inject(DB) private readonly db: Db,
@@ -70,14 +82,31 @@ export class PaymentsService {
     private readonly fx: FxService,
   ) {}
 
+  /** The rail behind each provider. ZIPIT needs a bank/aggregator integration — not live. */
+  private rail(provider: Provider): PaymentRail | null {
+    switch (provider) {
+      case 'ecocash_usd':
+        return this.ecocashUsd;
+      case 'ecocash_zwg':
+        return this.ecocashZwg;
+      case 'paystack':
+        return this.paystack;
+      default:
+        return null;
+    }
+  }
+
+  ecocashFor(currency: string): EcocashClient {
+    return currency === 'ZWG' ? this.ecocashZwg : this.ecocashUsd;
+  }
+
   async createIntent(userId: string, body: unknown) {
     const parsed = CreatePaymentSchema.safeParse(body);
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
     const dto = parsed.data;
 
-    const providerCurrency = PROVIDER_CURRENCY[dto.provider];
-    if (!providerCurrency)
-      throw new ValidationError(`Provider ${dto.provider} is not available yet`);
+    const rail = this.rail(dto.provider);
+    if (!rail) throw new ValidationError(`Provider ${dto.provider} is not available yet`);
 
     const idempotencyKey = dto.idempotency_key ?? randomUUID();
 
@@ -105,9 +134,9 @@ export class PaymentsService {
       quote = await this.quoteTip(dto.intent_ref_id, dto.amount_minor, dto.currency);
     }
 
-    if (quote.amount.currency !== providerCurrency) {
+    if (!(rail.currencies as readonly string[]).includes(quote.amount.currency)) {
       throw new ValidationError(
-        `${dto.provider} charges in ${providerCurrency}, but this payment is in ${quote.amount.currency}`,
+        `${dto.provider} charges in ${rail.currencies.join('/')}, but this payment is in ${quote.amount.currency}`,
       );
     }
 
@@ -129,19 +158,87 @@ export class PaymentsService {
       .returning();
     if (!payment) throw new Error('Failed to create payment');
 
-    const providerRef = await this.initiateCharge(payment, dto.msisdn);
-    return { payment_id: payment.id, provider_ref: providerRef, status: 'pending' };
+    const result = await this.initiateCharge(payment, dto.msisdn);
+    return {
+      payment_id: payment.id,
+      provider_ref: result.provider_ref,
+      status: 'pending',
+      ...(result.redirect_url && { redirect_url: result.redirect_url }),
+    };
+  }
+
+  /** A payment's state for its owner (the checkout polls this). Reconciles stale ones. */
+  async getForUser(userId: string, paymentId: string) {
+    let [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.id, paymentId), eq(payments.userId, userId)))
+      .limit(1);
+    if (!payment) throw new ResourceNotFoundError('Payment');
+
+    if (
+      (payment.state === 'pending' || payment.state === 'initiated') &&
+      Date.now() - payment.createdAt.getTime() > RECONCILE_AFTER_MS
+    ) {
+      await this.reconcile(payment).catch((err: unknown) =>
+        this.logger.warn({ payment_id: payment!.id, err }, 'Reconcile failed'),
+      );
+      [payment] = await this.db.select().from(payments).where(eq(payments.id, paymentId));
+    }
+
+    return {
+      id: payment!.id,
+      state: payment!.state,
+      intent: payment!.intent,
+      intent_ref_id: payment!.intentRefId,
+      amount: new Money(BigInt(payment!.amountMinor), payment!.currency as CurrencyCode).toJSON(),
+    };
+  }
+
+  /**
+   * Ask the provider what happened and apply it (§3.12). Covers lost webhooks; run from
+   * status polls and a periodic sweep. A provider that can't tell (dev) changes nothing.
+   */
+  async reconcile(payment: Payment): Promise<void> {
+    const rail = this.rail(payment.provider);
+    if (!rail) return;
+    const status = await rail.getStatus(payment.idempotencyKey);
+    if (!status || status === 'pending') return;
+    await this.applyOutcome(payment.idempotencyKey, { status });
+  }
+
+  /** Reconcile every payment stuck pending between 2 minutes and 2 days old. */
+  async reconcilePending(): Promise<number> {
+    const stale = await this.db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          inArray(payments.state, ['initiated', 'pending']),
+          lt(payments.createdAt, new Date(Date.now() - 2 * 60_000)),
+          gt(payments.createdAt, new Date(Date.now() - 2 * 24 * 3600_000)),
+        ),
+      )
+      .limit(500);
+    for (const p of stale) {
+      await this.reconcile(p).catch((err: unknown) =>
+        this.logger.warn({ payment_id: p.id, err }, 'Reconcile failed'),
+      );
+    }
+    return stale.length;
   }
 
   /**
    * Charge a subscription renewal at the amount locked on the subscription (§3.6), using
-   * the payer number and provider of the last completed payment. Idempotent per day.
+   * the payer number and EcoCash rail of the last completed payment. Idempotent per day.
+   * Card (Paystack) subscriptions can't be charged without the viewer and are left to lapse.
    */
   async createRenewalCharge(
     sub: typeof subscriptions.$inferSelect,
     lastPayment: Payment,
     idempotencyKey: string,
   ): Promise<void> {
+    if (lastPayment.provider !== 'ecocash_usd' && lastPayment.provider !== 'ecocash_zwg') return;
     if (!lastPayment.payerMsisdn) {
       this.logger.warn({ subscription_id: sub.id }, 'No payer number on file; cannot renew');
       return;
@@ -167,20 +264,9 @@ export class PaymentsService {
     await this.initiateCharge(payment, lastPayment.payerMsisdn);
   }
 
-  /**
-   * Idempotent webhook handler for EcoCash. Invariant §11.
-   *
-   * The payment row is locked FOR UPDATE and the state change plus every ledger entry
-   * commit in one DB transaction, so concurrent or retried deliveries settle exactly once
-   * and a crash part-way leaves the payment pending for the retry to finish.
-   */
+  /** EcoCash webhook (§11). Signature over the raw body, checked with the payment's own rail. */
   async handleEcocashWebhook(payload: string, signature: string) {
-    let json: unknown;
-    try {
-      json = JSON.parse(payload);
-    } catch {
-      throw new ValidationError('Invalid webhook payload');
-    }
+    const json = parseJson(payload);
     const parsed = EcocashWebhookSchema.safeParse(json);
     if (!parsed.success) throw new ValidationError('Invalid webhook payload');
     const data = parsed.data;
@@ -191,18 +277,106 @@ export class PaymentsService {
       .where(eq(payments.idempotencyKey, data.reference))
       .limit(1);
     if (!known) throw new ResourceNotFoundError('Payment');
-
-    // Verify with the rail the payment was actually created on, never a body field.
+    if (known.provider !== 'ecocash_usd' && known.provider !== 'ecocash_zwg') {
+      throw new ValidationError('Not an EcoCash payment');
+    }
     const client = known.provider === 'ecocash_zwg' ? this.ecocashZwg : this.ecocashUsd;
     if (!client.verifyWebhookSignature(payload, signature)) {
       throw new ValidationError('Invalid webhook signature');
     }
 
+    // §3.12: the provider's own record wins over the callback when it has one.
+    const claimed: ProviderStatus =
+      data.status.toUpperCase() === 'COMPLETED' ? 'completed' : 'failed';
+    const confirmed = (await client.getStatus(data.reference)) ?? claimed;
+    if (confirmed === 'pending') return { ok: true, pending: true };
+    if (confirmed !== claimed) {
+      this.logger.warn(
+        { reference: data.reference, claimed, confirmed },
+        'Webhook disagrees with provider',
+      );
+    }
+    return this.applyOutcome(data.reference, {
+      status: confirmed,
+      providerRef: data.provider_ref,
+      raw: json,
+    });
+  }
+
+  /**
+   * Paystack webhook. Signed with HMAC-SHA512 of the raw body. Settles only when Paystack's
+   * verify endpoint agrees and the amount and currency match what we asked for.
+   */
+  async handlePaystackWebhook(payload: string, signature: string) {
+    if (!this.paystack.verifyWebhookSignature(payload, signature)) {
+      throw new ValidationError('Invalid webhook signature');
+    }
+    const json = parseJson(payload);
+    const parsed = PaystackWebhookSchema.safeParse(json);
+    if (!parsed.success) throw new ValidationError('Invalid webhook payload');
+    const { event, data } = parsed.data;
+    if (event !== 'charge.success') return { ok: true, ignored: event };
+
+    const [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.idempotencyKey, data.reference), eq(payments.provider, 'paystack')))
+      .limit(1);
+    if (!payment) throw new ResourceNotFoundError('Payment');
+
+    const verified = (await this.paystack.verify(data.reference)) ?? {
+      status: 'completed' as const,
+      amountMinor: BigInt(data.amount),
+      currency: data.currency,
+    };
+    if (
+      verified.status === 'completed' &&
+      (verified.amountMinor !== BigInt(payment.amountMinor) ||
+        verified.currency !== payment.currency)
+    ) {
+      // Paid a different amount than we asked: don't unlock anything; needs a human.
+      this.logger.error(
+        {
+          payment_id: payment.id,
+          expected: payment.amountMinor,
+          got: String(verified.amountMinor),
+        },
+        'Paystack amount/currency mismatch',
+      );
+      return { ok: true, mismatch: true };
+    }
+    if (verified.status === 'pending') return { ok: true, pending: true };
+    return this.applyOutcome(data.reference, { status: verified.status, raw: json });
+  }
+
+  /**
+   * Dev only: settle one of your own payments without a provider, so checkout can be tried
+   * end to end locally. Refuses in production regardless of configuration.
+   */
+  async simulate(userId: string, paymentId: string, status: 'completed' | 'failed') {
+    if (process.env.NODE_ENV === 'production' || process.env.DEV_SIMULATE_PAYMENTS !== 'true') {
+      throw new ResourceNotFoundError('Route');
+    }
+    const [payment] = await this.db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.id, paymentId), eq(payments.userId, userId)))
+      .limit(1);
+    if (!payment) throw new ResourceNotFoundError('Payment');
+    return this.applyOutcome(payment.idempotencyKey, { status, raw: { simulated: true } });
+  }
+
+  /**
+   * The one place a payment changes final state. The payment row is locked FOR UPDATE and
+   * the state change plus every ledger entry commit in one DB transaction, so concurrent or
+   * retried deliveries settle exactly once and a crash part-way rolls back for the retry.
+   */
+  private async applyOutcome(reference: string, outcome: Outcome) {
     return this.db.transaction(async (tx) => {
       const [payment] = await tx
         .select()
         .from(payments)
-        .where(eq(payments.idempotencyKey, data.reference))
+        .where(eq(payments.idempotencyKey, reference))
         .for('update')
         .limit(1);
       if (!payment) throw new ResourceNotFoundError('Payment');
@@ -214,11 +388,11 @@ export class PaymentsService {
       }
 
       const now = new Date();
-      if (data.status !== 'COMPLETED') {
+      if (outcome.status !== 'completed') {
         if (payment.state === 'failed') return { ok: true, idempotent: true };
         await tx
           .update(payments)
-          .set({ state: 'failed', rawCallback: json, updatedAt: now })
+          .set({ state: 'failed', rawCallback: outcome.raw ?? null, updatedAt: now })
           .where(eq(payments.id, payment.id));
         return { ok: true };
       }
@@ -227,8 +401,8 @@ export class PaymentsService {
         .update(payments)
         .set({
           state: 'completed',
-          providerRef: data.provider_ref,
-          rawCallback: json,
+          ...(outcome.providerRef && { providerRef: outcome.providerRef }),
+          ...(outcome.raw !== undefined && { rawCallback: outcome.raw }),
           updatedAt: now,
         })
         .where(eq(payments.id, payment.id));
@@ -296,21 +470,24 @@ export class PaymentsService {
     };
   }
 
-  private async initiateCharge(payment: Payment, msisdn: string): Promise<string> {
+  private async initiateCharge(payment: Payment, msisdn: string): Promise<ChargeResult> {
+    const rail = this.rail(payment.provider);
+    if (!rail) throw new ValidationError(`Provider ${payment.provider} is not available yet`);
     try {
-      const client = payment.provider === 'ecocash_zwg' ? this.ecocashZwg : this.ecocashUsd;
-      const result = await client.createCharge({
+      const result = await rail.createCharge({
         msisdn,
         amountMinor: BigInt(payment.amountMinor),
-        currency: payment.currency as 'USD' | 'ZWG',
+        currency: payment.currency as CurrencyCode,
         reference: payment.idempotencyKey,
+        // Card rails require an email; users sign up by phone, so use a non-routable one.
+        email: `${payment.userId}@users.streamzw.invalid`,
       });
       // Only advance initiated → pending: a fast webhook may already have settled it.
       await this.db
         .update(payments)
         .set({ state: 'pending', providerRef: result.provider_ref, updatedAt: new Date() })
         .where(and(eq(payments.id, payment.id), eq(payments.state, 'initiated')));
-      return result.provider_ref;
+      return result;
     } catch (err) {
       await this.db
         .update(payments)
@@ -602,5 +779,13 @@ export class PaymentsService {
       ],
       tx,
     );
+  }
+}
+
+function parseJson(payload: string): unknown {
+  try {
+    return JSON.parse(payload);
+  } catch {
+    throw new ValidationError('Invalid webhook payload');
   }
 }

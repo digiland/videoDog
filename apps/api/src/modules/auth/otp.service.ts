@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomInt } from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { and, desc, eq, gt, isNull } from 'drizzle-orm';
+import { and, desc, eq, gt, isNull, lt, sql } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { otpChallenges } from '../../db/schema';
 import { WhatsAppClient } from '../notifications/whatsapp.client';
@@ -42,11 +42,14 @@ export class OtpService {
     }
   }
 
+  /**
+   * Check a code. The attempt is counted with one conditional UPDATE before comparing, so
+   * parallel guesses can't share an attempt and the 5-try lock can't be raced past.
+   */
   async verify(phone: string, code: string): Promise<void> {
     const now = new Date();
-    // Find most recent unconsumed challenge for this phone
     const [challenge] = await this.db
-      .select()
+      .select({ id: otpChallenges.id })
       .from(otpChallenges)
       .where(
         and(
@@ -57,26 +60,33 @@ export class OtpService {
       )
       .orderBy(desc(otpChallenges.createdAt))
       .limit(1);
-
     if (!challenge) throw new OtpExpiredError();
-    if (challenge.attempts >= MAX_ATTEMPTS) throw new OtpLockedError();
 
-    // Increment attempts first
-    await this.db
+    const [claimed] = await this.db
       .update(otpChallenges)
-      .set({ attempts: challenge.attempts + 1 })
-      .where(eq(otpChallenges.id, challenge.id));
+      .set({ attempts: sql`${otpChallenges.attempts} + 1` })
+      .where(
+        and(
+          eq(otpChallenges.id, challenge.id),
+          lt(otpChallenges.attempts, MAX_ATTEMPTS),
+          isNull(otpChallenges.consumedAt),
+        ),
+      )
+      .returning({ attempts: otpChallenges.attempts, codeHash: otpChallenges.codeHash });
+    if (!claimed) throw new OtpLockedError();
 
-    const valid = await bcrypt.compare(code, challenge.codeHash);
+    const valid = await bcrypt.compare(code, claimed.codeHash);
     if (!valid) {
-      if (challenge.attempts + 1 >= MAX_ATTEMPTS) throw new OtpLockedError();
+      if (claimed.attempts >= MAX_ATTEMPTS) throw new OtpLockedError();
       throw new OtpInvalidError();
     }
 
-    // Mark consumed
-    await this.db
+    // Consume once: a second concurrent correct guess finds it already consumed.
+    const [consumed] = await this.db
       .update(otpChallenges)
       .set({ consumedAt: now })
-      .where(eq(otpChallenges.id, challenge.id));
+      .where(and(eq(otpChallenges.id, challenge.id), isNull(otpChallenges.consumedAt)))
+      .returning({ id: otpChallenges.id });
+    if (!consumed) throw new OtpExpiredError();
   }
 }

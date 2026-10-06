@@ -5,6 +5,8 @@ import { FxService } from '../modules/fx/fx.service';
 import { RbzScraper } from '../modules/fx/rbz.scraper';
 import { OxrClient } from '../modules/fx/oxr.client';
 import { SubscriptionsService } from '../modules/subscriptions/subscriptions.service';
+import { PaymentsService } from '../modules/payments/payments.service';
+import { WalletService } from '../modules/wallet/wallet.service';
 import { bullmqConnection } from '../common/bullmq-connection';
 
 @Injectable()
@@ -18,6 +20,8 @@ export class SchedulerService {
     private readonly rbzScraper: RbzScraper,
     private readonly oxrClient: OxrClient,
     private readonly subscriptionsService: SubscriptionsService,
+    private readonly paymentsService: PaymentsService,
+    private readonly walletService: WalletService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.premiumPoolQueue = new Queue('payouts.calculate_premium_pool', {
@@ -129,6 +133,28 @@ export class SchedulerService {
       } catch (err) {
         this.logger.error('Failed to enqueue premium pool calculations job', err);
       }
+    }
+  }
+
+  /** §3.12: settle payments whose webhook never arrived, by asking the provider. */
+  @Cron('*/5 * * * *')
+  async reconcilePayments() {
+    try {
+      const n = await this.paymentsService.reconcilePending();
+      if (n > 0) this.logger.log(`Reconciled ${n} stale payments`);
+    } catch (err) {
+      this.logger.error('Payment reconciliation failed', err);
+    }
+  }
+
+  /** Send requested creator payouts. */
+  @Cron('*/10 * * * *')
+  async processPayouts() {
+    try {
+      const n = await this.walletService.processPayouts();
+      if (n > 0) this.logger.log(`Processed ${n} payouts`);
+    } catch (err) {
+      this.logger.error('Payout processing failed', err);
     }
   }
 }

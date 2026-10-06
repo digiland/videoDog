@@ -9,6 +9,7 @@ import {
   sign,
   webhookBody,
 } from '../../test/harness';
+import { createHmac } from 'crypto';
 import { PaymentsService } from './payments.service';
 import { accounts, ledgerEntries, payments, purchases } from '../../db/schema';
 import type { Db } from '../../db/db.module';
@@ -194,5 +195,154 @@ describe.skipIf(!hasDb)('payments (integration)', () => {
       net.set(r.currency, (net.get(r.currency) ?? 0n) + BigInt(r.debit) - BigInt(r.credit));
     }
     for (const [, v] of net) expect(v).toBe(0n);
+  });
+
+  describe('paystack', () => {
+    const KEY = 'sk_test_paystack_secret_0123456789';
+    type Verify = {
+      status: 'completed' | 'failed' | 'pending';
+      amountMinor: bigint;
+      currency: string;
+    } | null;
+    let paystackSvc: PaymentsService;
+    let verifyResult: Verify = null;
+
+    beforeAll(() => {
+      process.env.PAYSTACK_SECRET_KEY = KEY;
+      const s2 = services(db);
+      paystackSvc = new PaymentsService(db, s2.ledger, s2.fx);
+      // Never hit Paystack from tests: stub the verify call.
+      const client = (
+        paystackSvc as unknown as { paystack: { verify: (r: string) => Promise<Verify> } }
+      ).paystack;
+      client.verify = async () => verifyResult;
+      (client as unknown as { createCharge: () => Promise<unknown> }).createCharge = async () => ({
+        provider_ref: 'ps-test',
+        status: 'pending',
+        redirect_url: 'https://checkout.paystack.test/x',
+      });
+    });
+    afterAll(() => {
+      delete process.env.PAYSTACK_SECRET_KEY;
+    });
+
+    function signed(body: string) {
+      return createHmac('sha512', KEY).update(body).digest('hex');
+    }
+
+    async function zarPurchase(priceMinor = 2000) {
+      const creator = await makeUser(db, { role: 'creator' });
+      const viewer = await makeUser(db);
+      const video = await makeVideo(db, creator.id, {
+        ppvPriceMinorUnits: String(priceMinor),
+        ppvPriceCurrency: 'ZAR',
+      });
+      const [purchase] = await db
+        .insert(purchases)
+        .values({
+          userId: viewer.id,
+          videoId: video.id,
+          state: 'pending',
+          paidAmountMinor: String(priceMinor),
+          paidCurrency: 'ZAR',
+          usdEquivalentMinor: '108',
+        })
+        .returning();
+      const intent = await paystackSvc.createIntent(viewer.id, {
+        provider: 'paystack',
+        intent: 'purchase',
+        intent_ref_id: purchase!.id,
+        msisdn: viewer.phoneE164,
+      });
+      const [payment] = await db.select().from(payments).where(eq(payments.id, intent.payment_id));
+      return { creator, viewer, purchase: purchase!, payment: payment! };
+    }
+
+    it('refuses a forged signature', async () => {
+      const body = JSON.stringify({
+        event: 'charge.success',
+        data: { reference: 'x', amount: 1, currency: 'ZAR' },
+      });
+      await expect(paystackSvc.handlePaystackWebhook(body, 'bad')).rejects.toThrow(/signature/);
+    });
+
+    it('does not unlock when Paystack charged a different amount', async () => {
+      const { purchase, payment } = await zarPurchase(2000);
+      verifyResult = { status: 'completed', amountMinor: 1n, currency: 'ZAR' };
+      const body = JSON.stringify({
+        event: 'charge.success',
+        data: { reference: payment.idempotencyKey, amount: 1, currency: 'ZAR', status: 'success' },
+      });
+      const res = await paystackSvc.handlePaystackWebhook(body, signed(body));
+      expect(res).toMatchObject({ mismatch: true });
+      const [p] = await db.select().from(purchases).where(eq(purchases.id, purchase.id));
+      expect(p!.state).toBe('pending');
+    });
+
+    it('settles a verified ZAR card payment through fx_holding', async () => {
+      const { creator, purchase, payment } = await zarPurchase(2000);
+      verifyResult = { status: 'completed', amountMinor: 2000n, currency: 'ZAR' };
+      const body = JSON.stringify({
+        event: 'charge.success',
+        data: {
+          reference: payment.idempotencyKey,
+          amount: 2000,
+          currency: 'ZAR',
+          status: 'success',
+        },
+      });
+      await paystackSvc.handlePaystackWebhook(body, signed(body));
+      const [p] = await db.select().from(purchases).where(eq(purchases.id, purchase.id));
+      expect(p!.state).toBe('completed');
+      expect(await creatorBalance(creator.id)).toBe(76n); // 70% of 108 USD-cents, platform rounds half up
+    });
+  });
+
+  it('only shows a payment to its owner', async () => {
+    const { viewer, purchase } = await pendingPurchase();
+    const intent = await svc.createIntent(viewer.id, {
+      provider: 'ecocash_usd',
+      intent: 'purchase',
+      intent_ref_id: purchase.id,
+      msisdn: viewer.phoneE164,
+    });
+    await expect(svc.getForUser(viewer.id, intent.payment_id)).resolves.toMatchObject({
+      state: 'pending',
+    });
+    const stranger = await makeUser(db);
+    await expect(svc.getForUser(stranger.id, intent.payment_id)).rejects.toThrow(/not found/i);
+  });
+
+  it('reconciles a lost webhook from the provider status (§3.12)', async () => {
+    const { creator, viewer, purchase } = await pendingPurchase(100);
+    const intent = await svc.createIntent(viewer.id, {
+      provider: 'ecocash_usd',
+      intent: 'purchase',
+      intent_ref_id: purchase.id,
+      msisdn: viewer.phoneE164,
+    });
+    const [payment] = await db.select().from(payments).where(eq(payments.id, intent.payment_id));
+    const rail = (svc as unknown as { ecocashUsd: { getStatus: () => Promise<string | null> } })
+      .ecocashUsd;
+    const original = rail.getStatus;
+    rail.getStatus = async () => 'completed';
+    try {
+      await svc.reconcile(payment!);
+    } finally {
+      rail.getStatus = original;
+    }
+    expect(await creatorBalance(creator.id)).toBe(70n);
+  });
+
+  it('dev simulate is off unless explicitly enabled', async () => {
+    const { viewer, purchase } = await pendingPurchase();
+    const intent = await svc.createIntent(viewer.id, {
+      provider: 'ecocash_usd',
+      intent: 'purchase',
+      intent_ref_id: purchase.id,
+      msisdn: viewer.phoneE164,
+    });
+    delete process.env.DEV_SIMULATE_PAYMENTS;
+    await expect(svc.simulate(viewer.id, intent.payment_id, 'completed')).rejects.toThrow();
   });
 });

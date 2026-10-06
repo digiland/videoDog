@@ -171,22 +171,6 @@ export class SubscriptionsService {
     return updated!;
   }
 
-  async isActive(userId: string): Promise<boolean> {
-    const now = new Date();
-    const [row] = await this.db
-      .select({ id: subscriptions.id })
-      .from(subscriptions)
-      .where(
-        and(
-          eq(subscriptions.userId, userId),
-          eq(subscriptions.state, 'active'),
-          gt(subscriptions.expiresAt, now),
-        ),
-      )
-      .limit(1);
-    return !!row;
-  }
-
   /**
    * Daily renewal run. An expired auto-renewing subscription goes to `past_due` and is
    * charged at its locked amount (§3.6); `past_due` ones are retried once a day through the

@@ -6,9 +6,10 @@ import { captions, users as schema_users, videos, purchases } from '../../db/sch
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
 import { PlaybackService } from './playback.service';
+import { VideosRepository } from './videos.repository';
 import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
-import { originalKey, Money } from '@streamzw/shared';
+import { CURRENCY_CODES, originalKey, Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
@@ -19,7 +20,7 @@ const CreateVideoSchema = z.object({
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional(),
-  ppv_price_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']).optional(),
+  ppv_price_currency: z.enum(CURRENCY_CODES).optional(),
 });
 
 const UpdateVideoSchema = z.object({
@@ -27,7 +28,7 @@ const UpdateVideoSchema = z.object({
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']).optional(),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional().nullable(),
-  ppv_price_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']).optional().nullable(),
+  ppv_price_currency: z.enum(CURRENCY_CODES).optional().nullable(),
 });
 
 /** Who is asking. `null` = anonymous. */
@@ -45,6 +46,7 @@ export class VideosService {
     private readonly access: AccessService,
     private readonly fx: FxService,
     private readonly playback: PlaybackService,
+    private readonly repo: VideosRepository,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.transcodeQueue = new Queue('transcode', {
@@ -65,6 +67,8 @@ export class VideosService {
         'ppv_price_minor_units and ppv_price_currency required for ppv/premium_buyable',
       );
     }
+
+    await this.assertPricingCurrency(ownerId, dto.ppv_price_currency);
 
     const [video] = await this.db
       .insert(videos)
@@ -152,6 +156,7 @@ export class VideosService {
     await this.getOwned(videoId, ownerId);
 
     const dto = parsed.data;
+    await this.assertPricingCurrency(ownerId, dto.ppv_price_currency);
     const [updated] = await this.db
       .update(videos)
       .set({
@@ -168,6 +173,22 @@ export class VideosService {
       .returning();
 
     return updated!;
+  }
+
+  /**
+   * §3.5: prices are in the creator's canonical currency, locked when they became a
+   * creator. Viewers see conversions at render time; we never store a converted price.
+   */
+  private async assertPricingCurrency(ownerId: string, currency: string | null | undefined) {
+    if (!currency) return;
+    const [owner] = await this.db
+      .select({ canonical: schema_users.canonicalPricingCurrency })
+      .from(schema_users)
+      .where(eq(schema_users.id, ownerId))
+      .limit(1);
+    if (owner?.canonical && owner.canonical !== currency) {
+      throw new ValidationError(`Prices must be in your pricing currency (${owner.canonical})`);
+    }
   }
 
   async findById(videoId: string, viewer: Viewer) {
@@ -232,18 +253,25 @@ export class VideosService {
     limit?: number;
     includeUnpublished?: boolean;
   }) {
-    const limit = Math.min(filters.limit ?? 20, 100);
+    const limit = Math.min(Math.max(Number.isFinite(filters.limit) ? filters.limit! : 20, 1), 100);
+    const mode = filters.mode ? AccessModeSchema.safeParse(filters.mode) : undefined;
+    if (mode && !mode.success) {
+      throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
+    }
+
+    // Text search: ranked by relevance, one page (rank order has no stable cursor).
+    const q = filters.q?.trim();
+    if (q) {
+      const rows = await this.repo.searchPublished(q.slice(0, 200), mode?.data, limit);
+      return { items: await this.withCreators(rows), next_cursor: null };
+    }
+
     const conditions = [];
     if (!filters.includeUnpublished) {
       conditions.push(eq(videos.state, 'published'));
     }
 
-    if (filters.mode) {
-      const mode = AccessModeSchema.safeParse(filters.mode);
-      if (!mode.success)
-        throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
-      conditions.push(eq(videos.accessMode, mode.data));
-    }
+    if (mode?.data) conditions.push(eq(videos.accessMode, mode.data));
     if (filters.creatorId) {
       conditions.push(eq(videos.ownerId, filters.creatorId));
     }
@@ -273,8 +301,14 @@ export class VideosService {
     const hasMore = rows.length > limit;
     const slice = hasMore ? rows.slice(0, limit) : rows;
 
-    // Join creators in one shot
-    const ownerIds = Array.from(new Set(slice.map((v) => v.ownerId)));
+    const items = await this.withCreators(slice);
+    const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
+
+    return { items, next_cursor };
+  }
+
+  private async withCreators(rows: (typeof videos.$inferSelect)[]) {
+    const ownerIds = Array.from(new Set(rows.map((v) => v.ownerId)));
     const creators = ownerIds.length
       ? await this.db
           .select({
@@ -286,9 +320,8 @@ export class VideosService {
           .where(inArray(schema_users.id, ownerIds))
       : [];
     const byId = new Map(creators.map((c) => [c.id, c]));
-
-    const items = await Promise.all(
-      slice.map(async (v) => {
+    return Promise.all(
+      rows.map(async (v) => {
         const c = byId.get(v.ownerId);
         return {
           ...(await this.serialize(v)),
@@ -296,9 +329,6 @@ export class VideosService {
         };
       }),
     );
-    const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
-
-    return { items, next_cursor };
   }
 
   async getSignedPlaylistUrl(videoId: string, viewer: Viewer, apiBase: string) {

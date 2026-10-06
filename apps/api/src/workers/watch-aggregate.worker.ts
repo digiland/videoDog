@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { Worker } from 'bullmq';
-import { sql, and, eq, gte, lt } from 'drizzle-orm';
+import { sql, and, eq, gte, lt, sum } from 'drizzle-orm';
 import type { Db } from '../db/db.module';
 import { videos, watchSessions, watchMinutesDaily } from '../db/schema';
 import { bullmqConnection } from '../common/bullmq-connection';
@@ -24,7 +24,7 @@ export function createWatchAggregateWorker(redisUrl: string, db: Db): Worker {
       const rows = await db
         .select({
           videoId: watchSessions.videoId,
-          minutes: sql<string>`SUM(minutes_watched)`,
+          minutes: sum(watchSessions.minutesWatched),
         })
         .from(watchSessions)
         .innerJoin(videos, eq(videos.id, watchSessions.videoId))

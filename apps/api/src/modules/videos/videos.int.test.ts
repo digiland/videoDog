@@ -3,6 +3,7 @@ import { connect, hasDb, makeUser, makeVideo, services } from '../../test/harnes
 import { VideosService } from './videos.service';
 import { AccessService } from './access.service';
 import { PlaybackService } from './playback.service';
+import { VideosRepository } from './videos.repository';
 import { eq } from 'drizzle-orm';
 import { purchases, videos as videosTable } from '../../db/schema';
 import type { Db } from '../../db/db.module';
@@ -24,7 +25,14 @@ describe.skipIf(!hasDb)('video visibility and playback grants (integration)', ()
     ({ db, close } = connect());
     const { fx } = services(db);
     const access = new AccessService(db, fx);
-    videos = new VideosService(db, storage, access, fx, new PlaybackService(storage));
+    videos = new VideosService(
+      db,
+      storage,
+      access,
+      fx,
+      new PlaybackService(storage),
+      new VideosRepository(db),
+    );
   });
   afterAll(async () => close());
 
@@ -105,5 +113,29 @@ describe.skipIf(!hasDb)('video visibility and playback grants (integration)', ()
       amount_minor: '3700',
       currency: 'ZAR',
     });
+  });
+
+  it('full-text search returns serialised published videos only', async () => {
+    const owner = await makeUser(db, { role: 'creator' });
+    const word = `zebra${Date.now()}`;
+    const pub = await makeVideo(db, owner.id, { title: `Mbira lesson ${word}` });
+    await makeVideo(db, owner.id, { title: `Draft ${word}`, state: 'ready', publishedAt: null });
+
+    const { items } = await videos.list({ q: word });
+    expect(items.map((v) => v.id)).toEqual([pub.id]);
+    expect(items[0]).not.toHaveProperty('hls_playlist_key');
+    await expect(videos.list({ mode: 'bogus' })).rejects.toThrow(/mode must be/);
+  });
+
+  it('pages through the catalogue with the cursor', async () => {
+    const owner = await makeUser(db, { role: 'creator' });
+    for (let i = 0; i < 3; i++) await makeVideo(db, owner.id);
+    const first = await videos.list({ creatorId: owner.id, limit: 2 });
+    expect(first.items).toHaveLength(2);
+    expect(first.next_cursor).not.toBeNull();
+    const second = await videos.list({ creatorId: owner.id, limit: 2, cursor: first.next_cursor! });
+    expect(second.items).toHaveLength(1);
+    expect(second.items[0]!.id).not.toBe(first.items[0]!.id);
+    expect(second.items[0]!.id).not.toBe(first.items[1]!.id);
   });
 });

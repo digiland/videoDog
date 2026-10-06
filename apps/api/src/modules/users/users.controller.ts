@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Req,
@@ -14,15 +15,16 @@ import { RequireAuthGuard } from '../auth/require-auth.guard';
 import type { AuthenticatedRequest } from '../auth/jwt.guard';
 import { UsersService } from './users.service';
 import { z } from 'zod';
+import { CURRENCY_CODES } from '@streamzw/shared';
 import { ValidationError } from '../auth/errors';
 
 const BecomeCreatorSchema = z.object({
-  canonical_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']),
+  canonical_currency: z.enum(CURRENCY_CODES),
 });
 
 const ApplyCreatorSchema = z.object({
   pitch: z.string().min(20, 'Pitch must be at least 20 characters').max(800),
-  canonical_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']),
+  canonical_currency: z.enum(CURRENCY_CODES),
 });
 
 @Controller()
@@ -38,6 +40,22 @@ export class UsersController {
   @Patch('users/me')
   async update(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
     return this.users.update(req.user.id, body);
+  }
+
+  @Post('users/me/payout-msisdn')
+  async setPayoutMsisdn(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
+    return this.users.setPayoutMsisdn(req.user.id, body);
+  }
+
+  @Post('users/me/kyc/id')
+  async submitNationalId(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
+    return this.users.submitNationalId(req.user.id, body);
+  }
+
+  @Post('admin/users/:id/kyc/verify')
+  async verifyNationalId(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    if (req.user.role !== 'admin') throw new ForbiddenException();
+    return this.users.verifyNationalId(id, req.user.id);
   }
 
   @Post('users/me/apply-creator')

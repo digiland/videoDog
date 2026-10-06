@@ -1,6 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { Worker } from 'bullmq';
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, sum } from 'drizzle-orm';
 import type { Db } from '../db/db.module';
 import type { LedgerEntryInput, LedgerService } from '../modules/payments/ledger.service';
 import {
@@ -85,7 +85,7 @@ export async function runPremiumPool(
     }
 
     const [revenueRow] = await tx
-      .select({ total: sql<string>`COALESCE(SUM(credit_minor::bigint), 0)` })
+      .select({ total: sum(ledgerEntries.creditMinor) })
       .from(ledgerEntries)
       .where(
         and(
@@ -113,7 +113,7 @@ export async function runPremiumPool(
       .select({
         videoId: watchMinutesDaily.videoId,
         ownerId: videos.ownerId,
-        minutes: sql<string>`SUM(${watchMinutesDaily.minutes}::bigint)`,
+        minutes: sum(watchMinutesDaily.minutes),
       })
       .from(watchMinutesDaily)
       .innerJoin(videos, eq(watchMinutesDaily.videoId, videos.id))
@@ -127,7 +127,7 @@ export async function runPremiumPool(
       .groupBy(watchMinutesDaily.videoId, videos.ownerId)
       // Stable order: allocate() breaks remainder ties by position, so an unordered
       // GROUP BY could hand the odd cent to a different creator on each run.
-      .orderBy(desc(sql`SUM(${watchMinutesDaily.minutes}::bigint)`), watchMinutesDaily.videoId);
+      .orderBy(desc(sum(watchMinutesDaily.minutes)), watchMinutesDaily.videoId);
 
     const weights = minutesByVideo.map((r) => BigInt(r.minutes ?? '0'));
     const hasMinutes = weights.some((w) => w > 0n);

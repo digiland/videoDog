@@ -6,9 +6,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import { FxService } from './fx.service';
 import { z } from 'zod';
 import { ValidationError } from '../auth/errors';
-import type { CurrencyCode } from '@streamzw/shared';
-
-const CURRENCY_CODES = ['USD', 'ZWG', 'ZAR', 'EUR', 'GBP'] as const;
+import { CURRENCY_CODES } from '@streamzw/shared';
 
 const OverrideSchema = z.object({
   base: z.enum(CURRENCY_CODES),
@@ -24,10 +22,13 @@ export class FxController {
 
   @Get('fx/rates')
   async getRates(@Query('base') base?: string, @Query('quote') quote?: string) {
-    const b = (base ?? 'USD') as CurrencyCode;
-    const q = (quote ?? 'ZWG') as CurrencyCode;
-    const rate = await this.fx.rate(b, q);
-    return { base: b, quote: q, rate: rate.rate, source: rate.source };
+    const b = z.enum(CURRENCY_CODES).safeParse(base ?? 'USD');
+    const q = z.enum(CURRENCY_CODES).safeParse(quote ?? 'ZWG');
+    if (!b.success || !q.success)
+      throw new ValidationError('base and quote must be currency codes');
+    const rate = await this.fx.rate(b.data, q.data);
+    // The stored row may be the reverse pair; report what the rate actually means.
+    return { base: rate.base, quote: rate.quote, rate: rate.rate, source: rate.source };
   }
 
   @Post('admin/fx/override')

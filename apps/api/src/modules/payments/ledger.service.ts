@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sum } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
 import { DB, type Db, type DbOrTx } from '../../db/db.module';
 import { accounts, ledgerEntries } from '../../db/schema';
@@ -100,22 +100,19 @@ export class LedgerService {
 
   async balance(accountId: string, exec: DbOrTx = this.db): Promise<bigint> {
     const [row] = await exec
-      .select({
-        bal: sql<string>`COALESCE(SUM(credit_minor::bigint), 0) - COALESCE(SUM(debit_minor::bigint), 0)`,
-      })
+      .select({ credit: sum(ledgerEntries.creditMinor), debit: sum(ledgerEntries.debitMinor) })
       .from(ledgerEntries)
       .where(eq(ledgerEntries.accountId, accountId));
-    return BigInt(row?.bal ?? '0');
+    return BigInt(row?.credit ?? 0) - BigInt(row?.debit ?? 0);
   }
 
+  /** Net debits minus credits for a currency across the whole ledger; 0 when balanced (§8). */
   async trialBalance(currency: string): Promise<bigint> {
     const [row] = await this.db
-      .select({
-        bal: sql<string>`COALESCE(SUM(debit_minor::bigint), 0) - COALESCE(SUM(credit_minor::bigint), 0)`,
-      })
+      .select({ credit: sum(ledgerEntries.creditMinor), debit: sum(ledgerEntries.debitMinor) })
       .from(ledgerEntries)
       .where(eq(ledgerEntries.currency, currency));
-    return BigInt(row?.bal ?? '0');
+    return BigInt(row?.debit ?? 0) - BigInt(row?.credit ?? 0);
   }
 
   private assertBalance(entries: LedgerEntryInput[]): void {

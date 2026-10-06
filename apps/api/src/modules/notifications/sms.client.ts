@@ -5,7 +5,8 @@ export class SmsClient {
   private readonly logger = new Logger(SmsClient.name);
 
   async sendOtp(to: string, code: string): Promise<void> {
-    if (process.env.NODE_ENV !== 'production') {
+    // Print codes instead of sending only when explicitly asked, and never in production.
+    if (process.env.DEV_LOG_OTP === 'true' && process.env.NODE_ENV !== 'production') {
       process.stdout.write(`\n  OTP  ${to}  →  ${code}  (sms, dev)\n\n`);
       return;
     }

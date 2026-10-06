@@ -2,9 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { connect, hasDb, makeUser, services } from '../../test/harness';
 import { WalletService } from './wallet.service';
+import type { PaymentsService } from '../payments/payments.service';
 import { payouts } from '../../db/schema';
 import type { Db } from '../../db/db.module';
 import type { LedgerService } from '../payments/ledger.service';
+
+/** Stand-in for the EcoCash disbursement rail; each test sets the outcome. */
+let disburseOutcome: 'completed' | 'failed' = 'completed';
+const rails = {
+  ecocashFor: () => ({
+    disburse: async () => ({ provider_ref: 'test-ref', status: disburseOutcome }),
+  }),
+};
 
 describe.skipIf(!hasDb)('wallet payouts (integration)', () => {
   let db: Db;
@@ -16,7 +25,7 @@ describe.skipIf(!hasDb)('wallet payouts (integration)', () => {
     ({ db, close } = connect());
     const s = services(db);
     ledger = s.ledger;
-    wallet = new WalletService(db, s.ledger, s.fx);
+    wallet = new WalletService(db, s.ledger, s.fx, rails as unknown as PaymentsService);
   });
   afterAll(async () => close());
 
@@ -88,5 +97,38 @@ describe.skipIf(!hasDb)('wallet payouts (integration)', () => {
     await expect(
       wallet.requestPayout(creator.id, { amount_minor: 499, currency: 'USD' }),
     ).rejects.toThrow(/Minimum payout/);
+  });
+
+  it('refuses ZAR payouts (no rail yet)', async () => {
+    const { creator } = await fundedCreator(100_000n);
+    await expect(
+      wallet.requestPayout(creator.id, { amount_minor: 10_000, currency: 'ZAR' }),
+    ).rejects.toThrow(/aren't available/);
+  });
+
+  it('completes a payout: balance stays debited, payout marked completed', async () => {
+    const { creator, balanceAcc } = await fundedCreator(1000n);
+    const { payout_id } = await wallet.requestPayout(creator.id, {
+      amount_minor: 600,
+      currency: 'USD',
+    });
+    disburseOutcome = 'completed';
+    await wallet.processPayouts(1000);
+    const [row] = await db.select().from(payouts).where(eq(payouts.id, payout_id));
+    expect(row!.state).toBe('completed');
+    expect(await ledger.balance(balanceAcc)).toBe(400n);
+  });
+
+  it('a rejected payout restores the creator balance', async () => {
+    const { creator, balanceAcc } = await fundedCreator(1000n);
+    const { payout_id } = await wallet.requestPayout(creator.id, {
+      amount_minor: 600,
+      currency: 'USD',
+    });
+    disburseOutcome = 'failed';
+    await wallet.processPayouts(1000);
+    const [row] = await db.select().from(payouts).where(eq(payouts.id, payout_id));
+    expect(row!.state).toBe('failed');
+    expect(await ledger.balance(balanceAcc)).toBe(1000n);
   });
 });
