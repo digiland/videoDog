@@ -1,176 +1,97 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import type { Video } from '../../src/types/api';
-import VideoCard from './VideoCard';
-
-const MODES = [
-  { key: 'all', label: 'All' },
-  { key: 'free', label: 'Free' },
-  { key: 'ppv', label: 'Rent' },
-  { key: 'premium', label: 'Premium' },
-];
+import { Button, LinkButton } from '../../src/ui/button';
+import { Notice } from '../../src/ui/notice';
+import { EmptyState } from '../../src/ui/state';
+import { fetchCatalog, type ModeKey } from './viewer/catalog';
+import VideoGrid from './viewer/VideoGrid';
 
 interface CatalogClientProps {
   initialItems: Video[];
   initialCursor: string | null;
-  currentMode: string;
+  mode: ModeKey;
+  /** The server-side first page failed to load (as opposed to an empty catalogue). */
+  failed?: boolean;
 }
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
-
-// Placeholder skeletons are purely positional; give each a fixed key.
-const SKELETON_KEYS = Array.from({ length: 10 }, (_, i) => `skeleton-${i}`);
-
-function SkeletonCard() {
-  return (
-    <div>
-      <div className="aspect-video skeleton rounded-md" />
-      <div className="mt-2 h-4 w-3/4 skeleton rounded" />
-      <div className="mt-1.5 h-3 w-1/2 skeleton rounded" />
-    </div>
-  );
-}
-
+/**
+ * The catalogue grid. The first page arrives server-rendered; more pages load only when
+ * the viewer asks ("Load more"), so nobody spends data on thumbnails they never scroll to
+ * and the footer stays reachable. Remounted per filter (keyed by mode in the page).
+ */
 export default function CatalogClient({
   initialItems,
   initialCursor,
-  currentMode,
+  mode,
+  failed,
 }: CatalogClientProps) {
-  const [videos, setVideos] = useState<Video[]>(initialItems ?? []);
+  const [videos, setVideos] = useState<Video[]>(initialItems);
   const [cursor, setCursor] = useState<string | null>(initialCursor);
-  const [activeMode, setActiveMode] = useState(currentMode);
-  const [loading, setLoading] = useState(false);
-  const sentinelRef = useRef<HTMLDivElement>(null);
-  const cursorRef = useRef<string | null>(initialCursor);
-  const loadingRef = useRef(false);
-  const modeRef = useRef(currentMode);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
 
-  useEffect(() => {
-    cursorRef.current = cursor;
-  }, [cursor]);
-  useEffect(() => {
-    modeRef.current = activeMode;
-  }, [activeMode]);
-  useEffect(() => {
-    loadingRef.current = loading;
-  }, [loading]);
-
-  async function handleModeChange(mode: string) {
-    setActiveMode(mode);
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ limit: '20', state: 'published' });
-      if (mode !== 'all') params.set('mode', mode);
-      const res = await fetch(`${API_BASE}/videos?${params.toString()}`);
-      if (res.ok) {
-        const data = (await res.json()) as { items: Video[]; next_cursor: string | null };
-        setVideos(data.items);
-        setCursor(data.next_cursor);
-      }
-    } catch {
-      /* ignore */
-    } finally {
-      setLoading(false);
+  async function loadMore() {
+    if (!cursor || status === 'loading') return;
+    setStatus('loading');
+    const page = await fetchCatalog(mode, cursor);
+    if (!page) {
+      setStatus('error');
+      return;
     }
+    setVideos((prev) => {
+      const seen = new Set(prev.map((v) => v.id));
+      return [...prev, ...page.items.filter((v) => !seen.has(v.id))];
+    });
+    setCursor(page.next_cursor);
+    setStatus('idle');
   }
 
-  // Reads only refs and state setters, so it is stable for the component's lifetime.
-  const loadMore = useCallback(async () => {
-    const c = cursorRef.current;
-    if (!c || loadingRef.current) return;
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ limit: '20', state: 'published', cursor: c });
-      if (modeRef.current !== 'all') params.set('mode', modeRef.current);
-      const res = await fetch(`${API_BASE}/videos?${params.toString()}`);
-      if (res.ok) {
-        const data = (await res.json()) as { items: Video[]; next_cursor: string | null };
-        setVideos((prev) => [...prev, ...data.items]);
-        setCursor(data.next_cursor);
-      }
-    } catch {
-      /* ignore */
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!sentinelRef.current) return;
-    const obs = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) void loadMore();
-      },
-      { rootMargin: '600px' },
+  if (videos.length === 0) {
+    return failed ? (
+      <EmptyState
+        title="Couldn't load videos"
+        action={
+          <LinkButton href={mode === 'all' ? '/' : `/?mode=${mode}`} variant="secondary">
+            Try again
+          </LinkButton>
+        }
+      >
+        Check your connection, then try again.
+      </EmptyState>
+    ) : (
+      <EmptyState
+        title="Nothing here yet"
+        action={
+          mode !== 'all' && (
+            <LinkButton href="/" variant="secondary">
+              Show all videos
+            </LinkButton>
+          )
+        }
+      >
+        New videos show up here as soon as creators publish them.
+      </EmptyState>
     );
-    obs.observe(sentinelRef.current);
-    return () => obs.disconnect();
-  }, [loadMore]);
+  }
 
   return (
-    <>
-      <div className="flex items-center justify-between mb-5">
-        <h2 className="text-2xl font-bold">
-          {activeMode === 'all'
-            ? 'Browse all'
-            : activeMode === 'free'
-              ? 'Free to watch'
-              : activeMode === 'ppv'
-                ? 'Rent & own'
-                : 'Premium'}
-        </h2>
-        <div className="flex gap-1 bg-surface rounded-md p-1">
-          {MODES.map((m) => {
-            const active = activeMode === m.key;
-            return (
-              <button
-                type="button"
-                key={m.key}
-                onClick={() => void handleModeChange(m.key)}
-                className={`shrink-0 px-3 py-1.5 rounded text-sm font-medium transition ${
-                  active ? 'bg-bg text-ink' : 'text-ink-mute hover:text-ink'
-                }`}
-              >
-                {m.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {loading && videos.length === 0 ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-8">
-          {SKELETON_KEYS.map((k) => (
-            <SkeletonCard key={k} />
-          ))}
-        </div>
-      ) : videos.length === 0 ? (
-        <div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-8 opacity-30 pointer-events-none">
-            {SKELETON_KEYS.map((k) => (
-              <SkeletonCard key={k} />
-            ))}
-          </div>
-          <div className="text-center mt-10">
-            <p className="text-xl font-semibold">Nothing here yet</p>
-            <p className="text-ink-dim text-sm mt-1">
-              New videos will appear here as soon as creators publish.
-            </p>
-          </div>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-x-4 gap-y-8">
-          {videos.map((video, i) => (
-            <VideoCard key={video.id} video={video} index={i} />
-          ))}
+    <div className="flex flex-col gap-6">
+      <VideoGrid videos={videos} label="Videos" />
+      {status === 'error' && (
+        <Notice tone="error">Couldn&apos;t load more videos. Check your connection.</Notice>
+      )}
+      {cursor && (
+        <div className="flex justify-center">
+          <Button
+            variant="secondary"
+            loading={status === 'loading'}
+            onClick={() => void loadMore()}
+            className="w-full sm:w-auto sm:min-w-48"
+          >
+            {status === 'error' ? 'Try again' : 'Load more'}
+          </Button>
         </div>
       )}
-
-      <div ref={sentinelRef} className="h-12 mt-6 flex items-center justify-center">
-        {loading && cursor && (
-          <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-        )}
-      </div>
-    </>
+    </div>
   );
 }

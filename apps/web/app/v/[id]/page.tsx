@@ -1,10 +1,9 @@
 import type { Metadata } from 'next';
 import { cache } from 'react';
 import type { Video } from '../../../src/types/api';
+import { API_BASE } from '../../components/viewer/catalog';
 import VideoAccessSection from './VideoAccessSection';
 import VideoMeta from './VideoMeta';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
 
 /**
  * Anonymous, metadata-only fetch for server rendering (title, description, thumbnail).
@@ -41,12 +40,16 @@ export async function generateMetadata({
   };
 }
 
+/**
+ * Player first, edge to edge on phones (every pixel of a 360px screen goes to the video);
+ * the paywall takes the player's place in the same box, then title, price and data cost.
+ */
 export default async function VideoPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const video = await getPublicVideo(id);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className="mx-auto max-w-4xl md:px-4 md:pt-4">
       <VideoAccessSection
         videoId={id}
         initialThumbnailUrl={video?.thumbnail_url ?? null}

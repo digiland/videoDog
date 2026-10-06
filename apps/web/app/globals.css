@@ -80,8 +80,8 @@ body {
 
 /* System fonts only: zero bytes to download, Roboto on Android, SF on iOS. */
 :root {
-  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Helvetica Neue',
-    Arial, sans-serif;
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', 'Helvetica Neue', Arial, sans-serif;
 }
 
 /* Prices, durations, counts: digits that line up and don't jitter. */
@@ -94,13 +94,37 @@ body {
   background: var(--surface-2);
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* In the base layer so utilities like focus-visible:outline-none can override it. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--accent);
+    color: var(--on-accent);
+  }
 }
-::selection {
-  background: var(--accent);
-  color: var(--on-accent);
+
+/* Always-dark island: the player keeps dark chrome and letterbox in the light theme. */
+.theme-dark {
+  --bg: #121110;
+  --surface: #1b1917;
+  --surface-2: #25221f;
+  --line: #38332d;
+  --line-strong: #4a443c;
+  --ink: #f3efe9;
+  --ink-2: #bdb4a8;
+  --ink-3: #9a9084;
+  --accent: #e8834f;
+  --accent-strong: #f09a6a;
+  --on-accent: #1a0d05;
+  --gold: #e6b84a;
+  --sage: #93b98d;
+  --danger: #f06b5a;
+  --scrim: rgb(18 17 16 / 0.72);
+  color-scheme: dark;
+  color: var(--ink);
 }
 
 .no-scrollbar::-webkit-scrollbar {

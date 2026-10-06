@@ -1,6 +1,6 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '../../../src/lib/api';
 import type {
   PaywallPayload,
@@ -8,21 +8,16 @@ import type {
   PlaylistResponse,
   Video,
 } from '../../../src/types/api';
+import { LinkButton } from '../../../src/ui/button';
+import { Icon } from '../../../src/ui/icon';
 import Paywall from '../../components/Paywall';
 import VideoMeta from './VideoMeta';
 
+/** The player (and hls.js) load only once access is granted: no player bytes for a paywall. */
 const Player = dynamic(() => import('../../components/Player'), {
   ssr: false,
-  loading: () => <Spinner />,
+  loading: () => <Pending />,
 });
-
-function Spinner() {
-  return (
-    <div className="aspect-video bg-black rounded-xl flex items-center justify-center">
-      <div className="w-8 h-8 border-2 border-accent border-t-transparent rounded-full animate-spin" />
-    </div>
-  );
-}
 
 type AccessState =
   | { status: 'loading' }
@@ -41,6 +36,39 @@ function isDenied(
   res: PlaylistResponse,
 ): res is Extract<PlaylistResponse, { access_denied: true }> {
   return 'access_denied' in res && res.access_denied === true;
+}
+
+function Pending() {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center">
+      <Icon name="spinner" size={28} className="text-ink-2" label="Loading" />
+    </div>
+  );
+}
+
+/**
+ * The 16:9 stage. Player, paywall and loading states all render inside it, so nothing below
+ * moves when access is decided. Content stacks over a 16:9 spacer in one grid cell: if the
+ * paywall needs more height on a narrow phone, the box grows instead of clipping text.
+ */
+function Stage({ thumbnailUrl, children }: { thumbnailUrl: string | null; children: ReactNode }) {
+  return (
+    <div className="relative grid grid-cols-1 overflow-hidden bg-surface md:rounded-md">
+      <div className="aspect-video [grid-area:1/1]" aria-hidden="true" />
+      {thumbnailUrl && (
+        // eslint-disable-next-line @next/next/no-img-element -- short-lived signed thumbnail URL (see VideoCard).
+        <img
+          src={thumbnailUrl}
+          alt=""
+          width={1280}
+          height={720}
+          decoding="async"
+          className="absolute inset-0 h-full w-full object-cover"
+        />
+      )}
+      <div className="relative flex min-w-0 [grid-area:1/1]">{children}</div>
+    </div>
+  );
 }
 
 /**
@@ -133,40 +161,38 @@ export default function VideoAccessSection({
 
   return (
     <>
-      <div className="mb-6">
-        {state.status === 'loading' ? (
-          <Spinner />
-        ) : state.status === 'playable' ? (
+      {state.status === 'playable' ? (
+        <div className="relative aspect-video overflow-hidden bg-surface md:rounded-md">
           <Player
             videoId={videoId}
             src={state.playlist.url}
             kind={state.playlist.kind}
             captions={state.playlist.captions}
+            poster={thumbnailUrl}
             onPlaylistExpired={handlePlaylistExpired}
           />
-        ) : state.status === 'denied' ? (
-          // aspect-ratio box that may grow: on narrow phones the paywall is taller than 16:9.
-          <div className="relative aspect-video bg-[#16213e] rounded-xl flex items-center justify-center p-4">
-            {thumbnailUrl && (
-              <div className="absolute inset-0 overflow-hidden rounded-xl" aria-hidden="true">
-                {/* eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature. */}
-                <img
-                  src={thumbnailUrl}
-                  alt=""
-                  className="w-full h-full object-cover blur-sm opacity-30"
-                />
-              </div>
-            )}
-            <div className="relative w-full max-w-lg">
+        </div>
+      ) : (
+        <Stage thumbnailUrl={thumbnailUrl}>
+          {state.status === 'loading' ? (
+            <Pending />
+          ) : state.status === 'denied' ? (
+            <div className="flex w-full items-center justify-center bg-scrim">
               <Paywall payload={state.paywall} videoId={videoId} />
             </div>
-          </div>
-        ) : (
-          <div className="aspect-video bg-[#16213e] rounded-xl flex items-center justify-center">
-            <p className="text-gray-500">Video unavailable</p>
-          </div>
-        )}
-      </div>
+          ) : (
+            <div className="flex w-full flex-col items-center justify-center gap-3 bg-scrim p-4 text-center">
+              <p className="text-base font-semibold text-ink">This video isn&apos;t available</p>
+              <p className="text-sm text-ink-2">
+                It may have been removed, or the connection dropped.
+              </p>
+              <LinkButton href="/" variant="secondary">
+                Browse videos
+              </LinkButton>
+            </div>
+          )}
+        </Stage>
+      )}
       {!hasServerMetadata && video && <VideoMeta video={video} />}
     </>
   );

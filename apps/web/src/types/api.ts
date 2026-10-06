@@ -37,10 +37,10 @@ export interface Video {
   comments_enabled?: boolean;
 }
 
+/** Matches AccessService's PlanQuote in the API. */
 export interface PaywallPlanQuote {
-  id: string;
+  plan_id: string;
   code: string;
-  duration_days: number;
   /** What the subscription actually charges (plan base currency). */
   price: MoneyDTO;
   /** Render-only conversion to the viewer's display currency; absent without an FX rate. */

@@ -1,99 +1,54 @@
 import Link from 'next/link';
-import type { Video, VideoListResponse } from '../src/types/api';
 import CatalogClient from './components/CatalogClient';
+import { fetchCatalog, parseMode, type ModeKey } from './components/viewer/catalog';
+import ModeChips from './components/viewer/ModeChips';
+import { GridSection } from './components/viewer/VideoGrid';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+const HINTS: Partial<Record<ModeKey, { text: string; link?: { href: string; label: string } }>> = {
+  free: { text: 'Free to watch. You only spend data.' },
+  premium: {
+    text: 'Included with a Premium day, week or month pass.',
+    link: { href: '/pricing', label: 'See passes' },
+  },
+  ppv: { text: 'Pay once with EcoCash, then rewatch any time.' },
+};
 
-async function fetchVideos(mode?: string): Promise<VideoListResponse> {
-  try {
-    const params = new URLSearchParams({ limit: '20', state: 'published' });
-    if (mode && mode !== 'all') params.set('mode', mode);
-    const res = await fetch(`${API_BASE}/videos?${params.toString()}`, {
-      next: { revalidate: 60 },
-    });
-    if (!res.ok) return { items: [], next_cursor: null };
-    return res.json() as Promise<VideoListResponse>;
-  } catch {
-    return { items: [], next_cursor: null };
-  }
-}
-
+/**
+ * Home: the catalogue itself, no hero. A phone screen shows filters plus two rows of
+ * videos with their prices — something to watch within one thumb-scroll.
+ */
 export default async function HomePage({
   searchParams,
 }: {
   searchParams: Promise<{ mode?: string }>;
 }) {
-  const params = await searchParams;
-  const mode = params.mode ?? 'all';
-  const data = await fetchVideos(mode);
-  const featured: Video | undefined = data.items[0];
+  const mode = parseMode((await searchParams).mode);
+  const data = await fetchCatalog(mode, null, { next: { revalidate: 60 } });
+  const hint = HINTS[mode];
 
   return (
-    <div>
-      {/* Hero banner */}
-      <section className="relative h-[60vh] min-h-[420px] max-h-[640px] w-full overflow-hidden border-b border-line">
-        {featured?.thumbnail_url ? (
-          // eslint-disable-next-line @next/next/no-img-element -- thumbnails are short-lived presigned MinIO/S3 or BunnyCDN signed URLs whose host is per-deployment and whose query string changes on every request; next/image would need build-time remotePatterns and its optimizer cache would miss on every new signature.
-          <img
-            src={featured.thumbnail_url}
-            alt={featured.title}
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ) : (
-          <div className="absolute inset-0 bg-gradient-to-br from-bg-elev via-bg to-accent/10" />
-        )}
-        <div className="absolute inset-0 bg-gradient-to-t from-bg via-bg/70 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-r from-bg/90 via-bg/40 to-transparent" />
-
-        <div className="relative max-w-screen-2xl mx-auto h-full px-6 flex flex-col justify-end pb-12">
-          <div className="max-w-2xl fade-up">
-            <p className="text-accent text-sm font-semibold tracking-wider uppercase mb-3">
-              {featured ? 'Featured' : 'Welcome to StreamZW'}
-            </p>
-            <h1 className="text-4xl md:text-6xl font-bold leading-tight">
-              {featured?.title ?? "Watch Zimbabwe's creators."}
-            </h1>
-            <p className="mt-4 text-ink-mute text-base md:text-lg max-w-xl">
-              {featured?.description ??
-                'Free episodes, pay-per-view drops, and a $1.49 monthly pass that unlocks every premium video.'}
-            </p>
-            <div className="mt-6 flex flex-wrap gap-3">
-              {featured ? (
-                <Link
-                  href={`/v/${featured.id}`}
-                  className="bg-ink text-bg hover:bg-ink-mute font-semibold rounded-md px-6 py-3 text-sm flex items-center gap-2 transition"
-                >
-                  <svg aria-hidden="true" className="w-4 h-4 fill-current" viewBox="0 0 24 24">
-                    <path d="M8 5v14l11-7z" />
-                  </svg>
-                  Watch now
-                </Link>
-              ) : null}
-              <Link
-                href="/pricing"
-                className="bg-accent hover:bg-accent-hot text-bg font-semibold rounded-md px-6 py-3 text-sm transition"
-              >
-                Start a subscription
-              </Link>
-              <Link
-                href="/?mode=free"
-                className="bg-surface/80 hover:bg-surface text-ink font-semibold rounded-md px-6 py-3 text-sm transition border border-line"
-              >
-                Browse free
-              </Link>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* Catalogue */}
-      <section className="max-w-screen-2xl mx-auto px-6 py-10">
-        <CatalogClient
-          initialItems={data.items}
-          initialCursor={data.next_cursor}
-          currentMode={mode}
-        />
-      </section>
-    </div>
+    <GridSection>
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <h1 className="sr-only text-xl font-bold text-ink md:not-sr-only">Watch</h1>
+        <ModeChips active={mode} hrefFor={(m) => (m === 'all' ? '/' : `/?mode=${m}`)} />
+      </div>
+      {hint && (
+        <p className="-mt-1 text-sm text-ink-3">
+          {hint.text}{' '}
+          {hint.link && (
+            <Link href={hint.link.href} className="font-semibold text-accent hover:underline">
+              {hint.link.label}
+            </Link>
+          )}
+        </p>
+      )}
+      <CatalogClient
+        key={mode}
+        mode={mode}
+        initialItems={data?.items ?? []}
+        initialCursor={data?.next_cursor ?? null}
+        failed={data === null}
+      />
+    </GridSection>
   );
 }
