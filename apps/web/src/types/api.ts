@@ -28,7 +28,6 @@ export interface Video {
   in_premium_pool: boolean;
   state: 'uploading' | 'processing' | 'ready' | 'published' | 'unpublished' | 'failed';
   duration_seconds: number | null;
-  hls_playlist_key: string | null;
   thumbnail_key: string | null;
   thumbnail_url: string | null;
   published_at: string | null;
@@ -38,18 +37,21 @@ export interface Video {
   comments_enabled?: boolean;
 }
 
+/** Matches AccessService's PlanQuote in the API. */
+export interface PaywallPlanQuote {
+  plan_id: string;
+  code: string;
+  /** What the subscription actually charges (plan base currency). */
+  price: MoneyDTO;
+  /** Render-only conversion to the viewer's display currency; absent without an FX rate. */
+  display_price?: MoneyDTO;
+}
+
 export interface PaywallPayload {
   reasons: ('not_subscribed' | 'not_purchased')[];
   options: {
-    buy?: { price: MoneyDTO };
-    subscribe?: {
-      plans: Array<{
-        id: string;
-        code: string;
-        duration_days: number;
-        display_price: MoneyDTO;
-      }>;
-    };
+    buy?: { price: MoneyDTO; display_price?: MoneyDTO };
+    subscribe?: { plans: PaywallPlanQuote[] };
   };
 }
 
@@ -77,7 +79,7 @@ export interface Subscription {
 }
 
 export interface WalletBalance {
-  balances: Array<{ currency: string; amount_minor: string }>;
+  balances: Array<{ currency: string; balance_minor: string }>;
 }
 
 export interface Earnings {
@@ -88,6 +90,59 @@ export interface Earnings {
   month: string;
 }
 
-export interface PlaylistResponse {
+export interface CaptionTrack {
+  id: string;
+  language: string;
+  label: string;
+  kind: 'subtitles' | 'captions';
+  is_default?: boolean;
   url: string;
+}
+
+export interface PlayablePlaylist {
+  /** Directly playable; embeds its own short-lived token (no auth header needed). */
+  url: string;
+  kind: 'hls' | 'progressive';
+  expires_at: string;
+  captions: CaptionTrack[];
+}
+
+export interface PlaylistDenied {
+  access_denied: true;
+  paywall: PaywallPayload;
+}
+
+export type PlaylistResponse = PlayablePlaylist | PlaylistDenied;
+
+export type PaymentCurrencyCode = 'USD' | 'ZWG' | 'ZAR';
+
+export interface CreatePurchaseResponse {
+  purchase_id: string;
+  paid_amount: MoneyDTO;
+  usd_equivalent: MoneyDTO;
+}
+
+export interface CreateSubscriptionResponse {
+  subscription_id: string;
+  charged_amount: MoneyDTO;
+  usd_equivalent: MoneyDTO;
+  expires_at: string;
+}
+
+export interface CreatePaymentResponse {
+  payment_id: string;
+  provider_ref: string | null;
+  status: PaymentState;
+  /** Card (Paystack) payments: send the browser here to pay. Absent on idempotent replays. */
+  redirect_url?: string;
+}
+
+export type PaymentState = 'initiated' | 'pending' | 'completed' | 'failed' | 'reversed';
+
+export interface PaymentStatus {
+  id: string;
+  state: PaymentState;
+  intent: 'purchase' | 'subscription' | 'tip';
+  intent_ref_id: string | null;
+  amount: MoneyDTO;
 }

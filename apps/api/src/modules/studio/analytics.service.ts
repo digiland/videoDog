@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, count, countDistinct, eq, gte, lte, sum } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { watchMinutesDaily, watchSessions, purchases } from '../../db/schema';
 
@@ -13,7 +13,7 @@ export class AnalyticsService {
     const toDate = to.toISOString().slice(0, 10);
 
     const [row] = await this.db
-      .select({ total: sql<string>`COALESCE(SUM(minutes::bigint), 0)` })
+      .select({ total: sum(watchMinutesDaily.minutes) })
       .from(watchMinutesDaily)
       .where(
         and(
@@ -23,11 +23,11 @@ export class AnalyticsService {
         ),
       );
 
-    if (row && row.total !== '0') return BigInt(row.total);
+    if (row?.total && row.total !== '0') return BigInt(row.total);
 
     // Fallback: sum from watch_sessions
     const [fallback] = await this.db
-      .select({ total: sql<string>`COALESCE(SUM(minutes_watched), 0)` })
+      .select({ total: sum(watchSessions.minutesWatched) })
       .from(watchSessions)
       .where(
         and(
@@ -42,7 +42,7 @@ export class AnalyticsService {
 
   async conversionRate(videoId: string, from: Date, to: Date) {
     const [watchersRow] = await this.db
-      .select({ count: sql<string>`COUNT(DISTINCT user_id)` })
+      .select({ count: countDistinct(watchSessions.userId) })
       .from(watchSessions)
       .where(
         and(
@@ -53,7 +53,7 @@ export class AnalyticsService {
       );
 
     const [purchasesRow] = await this.db
-      .select({ count: sql<string>`COUNT(*)` })
+      .select({ count: count() })
       .from(purchases)
       .where(
         and(
@@ -64,8 +64,8 @@ export class AnalyticsService {
         ),
       );
 
-    const watchers = parseInt(watchersRow?.count ?? '0', 10);
-    const bought = parseInt(purchasesRow?.count ?? '0', 10);
+    const watchers = watchersRow?.count ?? 0;
+    const bought = purchasesRow?.count ?? 0;
 
     return {
       unique_watchers: watchers,

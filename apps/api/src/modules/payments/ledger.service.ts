@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, isNull, sum } from 'drizzle-orm';
 import { randomUUID } from 'crypto';
-import { DB, type Db } from '../../db/db.module';
+import { DB, type Db, type DbOrTx } from '../../db/db.module';
 import { accounts, ledgerEntries } from '../../db/schema';
 import { LedgerImbalanceError } from '../auth/errors';
 
@@ -21,15 +21,17 @@ export class LedgerService {
   constructor(@Inject(DB) private readonly db: Db) {}
 
   /**
-   * Insert all entries in one DB transaction.
+   * Insert all entries of one ledger transaction in a single INSERT (atomic on its own).
+   * Pass `exec` to make the entries part of a wider DB transaction — callers settling a
+   * payment must do so, so the ledger and the payment state commit or roll back together.
    * Asserts sum(debit) == sum(credit) per currency before inserting.
    * Invariant §8: balanced per currency.
    */
-  async recordTransaction(entries: LedgerEntryInput[]): Promise<string> {
+  async recordTransaction(entries: LedgerEntryInput[], exec: DbOrTx = this.db): Promise<string> {
     this.assertBalance(entries);
     const txId = randomUUID();
 
-    await this.db.insert(ledgerEntries).values(
+    await exec.insert(ledgerEntries).values(
       entries.map((e) => ({
         transactionId: txId,
         accountId: e.accountId,
@@ -50,12 +52,15 @@ export class LedgerService {
    * Find or create a named account. System accounts use scope='system', owner_id=NULL.
    * Creator accounts use scope='user', owner_id=creatorId.
    */
-  async findOrCreateAccount(params: {
-    scope: string;
-    ownerId?: string | null;
-    code: string;
-    currency: string;
-  }): Promise<string> {
+  async findOrCreateAccount(
+    params: {
+      scope: string;
+      ownerId?: string | null;
+      code: string;
+      currency: string;
+    },
+    exec: DbOrTx = this.db,
+  ): Promise<string> {
     const conditions = [
       eq(accounts.scope, params.scope),
       eq(accounts.code, params.code),
@@ -63,7 +68,7 @@ export class LedgerService {
       params.ownerId ? eq(accounts.ownerId, params.ownerId) : isNull(accounts.ownerId),
     ];
 
-    const [existing] = await this.db
+    const [existing] = await exec
       .select({ id: accounts.id })
       .from(accounts)
       .where(and(...conditions))
@@ -71,7 +76,7 @@ export class LedgerService {
 
     if (existing) return existing.id;
 
-    const [created] = await this.db
+    const [created] = await exec
       .insert(accounts)
       .values({
         scope: params.scope,
@@ -85,7 +90,7 @@ export class LedgerService {
     if (created) return created.id;
 
     // Race condition: retry select
-    const [retry] = await this.db
+    const [retry] = await exec
       .select({ id: accounts.id })
       .from(accounts)
       .where(and(...conditions))
@@ -93,24 +98,21 @@ export class LedgerService {
     return retry!.id;
   }
 
-  async balance(accountId: string): Promise<bigint> {
-    const [row] = await this.db
-      .select({
-        bal: sql<string>`COALESCE(SUM(credit_minor::bigint), 0) - COALESCE(SUM(debit_minor::bigint), 0)`,
-      })
+  async balance(accountId: string, exec: DbOrTx = this.db): Promise<bigint> {
+    const [row] = await exec
+      .select({ credit: sum(ledgerEntries.creditMinor), debit: sum(ledgerEntries.debitMinor) })
       .from(ledgerEntries)
       .where(eq(ledgerEntries.accountId, accountId));
-    return BigInt(row?.bal ?? '0');
+    return BigInt(row?.credit ?? 0) - BigInt(row?.debit ?? 0);
   }
 
+  /** Net debits minus credits for a currency across the whole ledger; 0 when balanced (§8). */
   async trialBalance(currency: string): Promise<bigint> {
     const [row] = await this.db
-      .select({
-        bal: sql<string>`COALESCE(SUM(debit_minor::bigint), 0) - COALESCE(SUM(credit_minor::bigint), 0)`,
-      })
+      .select({ credit: sum(ledgerEntries.creditMinor), debit: sum(ledgerEntries.debitMinor) })
       .from(ledgerEntries)
       .where(eq(ledgerEntries.currency, currency));
-    return BigInt(row?.bal ?? '0');
+    return BigInt(row?.debit ?? 0) - BigInt(row?.credit ?? 0);
   }
 
   private assertBalance(entries: LedgerEntryInput[]): void {

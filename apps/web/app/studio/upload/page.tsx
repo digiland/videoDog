@@ -1,467 +1,575 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../../../src/lib/api';
-import { isAuthenticated, getUser } from '../../../src/lib/auth';
-import type { Video } from '../../../src/types/api';
+import { minorToJsonNumber } from '../../../src/lib/money-input';
+import {
+  formatEta,
+  formatMB,
+  percent,
+  titleFromFileName,
+  type ResumeRecord,
+  type UploadDraft,
+} from '../../../src/lib/upload';
+import { Button, LinkButton } from '../../../src/ui/button';
+import { Field } from '../../../src/ui/field';
+import { Icon, type IconName } from '../../../src/ui/icon';
+import { Notice } from '../../../src/ui/notice';
+import { AccessModePicker } from '../_components/AccessModePicker';
+import {
+  type AccessMode,
+  errorMessage,
+  fetchMe,
+  needsPrice,
+  parsePpvPrice,
+} from '../_components/studio-data';
+import { PageTitle } from '../_components/ui';
+import {
+  clearResumeRecord,
+  readResumeRecord,
+  useResumableUpload,
+  type UploadView,
+} from '../_components/use-resumable-upload';
 
-type AccessMode = Video['access_mode'];
-type UploadState =
-  | 'idle'
-  | 'creating'
-  | 'uploading'
-  | 'complete-upload'
-  | 'processing'
-  | 'ready'
-  | 'publishing'
-  | 'published'
-  | 'failed';
+const EMPTY_DRAFT: UploadDraft = { title: '', description: '', access_mode: 'free', price: '' };
 
 export default function UploadPage() {
-  const router = useRouter();
+  const up = useResumableUpload();
+  const { view } = up;
+  const [currency, setCurrency] = useState('USD');
+  const [draft, setDraft] = useState<UploadDraft>(EMPTY_DRAFT);
+  const [pending, setPending] = useState<ResumeRecord | null>(null);
+  const [pickError, setPickError] = useState<string | null>(null);
+  const [priceError, setPriceError] = useState<string | null>(null);
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveNote, setSaveNote] = useState<{ tone: 'success' | 'error'; text: string } | null>(
+    null,
+  );
+  const [autoPublish, setAutoPublish] = useState(false);
 
-  // Auth check
   useEffect(() => {
-    if (!isAuthenticated()) {
-      router.push('/sign-in');
-      return;
+    fetchMe()
+      .then((me) => setCurrency(me.canonical_pricing_currency ?? 'USD'))
+      .catch(() => undefined);
+    const rec = readResumeRecord();
+    if (rec) {
+      setPending(rec);
+      if (rec.draft) setDraft(rec.draft);
     }
-    const user = getUser();
-    if (user && user.role !== 'creator' && user.role !== 'admin') {
-      router.push('/');
-    }
-  }, [router]);
+  }, []);
 
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [accessMode, setAccessMode] = useState<AccessMode>('free');
-  const [ppvPrice, setPpvPrice] = useState('');
-  const [ppvCurrency, setPpvCurrency] = useState('USD');
-  const [file, setFile] = useState<File | null>(null);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [uploadState, setUploadState] = useState<UploadState>('idle');
-  const [videoId, setVideoId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const { saveDraft, publish } = up;
+  useEffect(() => {
+    saveDraft(draft);
+  }, [draft, saveDraft]);
 
-  function cleanup() {
-    if (pollRef.current) clearInterval(pollRef.current);
+  const set = <K extends keyof UploadDraft>(k: K, v: UploadDraft[K]) => {
+    setDraft((d) => ({ ...d, [k]: v }));
+    setSaveNote(null);
+    if (k === 'price' || k === 'access_mode') setPriceError(null);
+    if (k === 'title') setTitleError(null);
+  };
+
+  function pickNew(file: File) {
+    setPickError(null);
+    const d = { ...draft, title: draft.title.trim() || titleFromFileName(file.name) };
+    setDraft(d);
+    // Bytes start moving now; details are saved with Publish (or Save draft) while it uploads.
+    void up.start(file, { title: d.title.trim().slice(0, 255), access_mode: 'free' }, d);
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    if (!title.trim()) {
-      setError('Title is required.');
-      return;
-    }
-    if (!file) {
-      setError('Please select a video file.');
-      return;
-    }
-    if (
-      (accessMode === 'ppv' || accessMode === 'premium_buyable') &&
-      (!ppvPrice || isNaN(parseFloat(ppvPrice)) || parseFloat(ppvPrice) <= 0)
-    ) {
-      setError('Please enter a valid price.');
-      return;
-    }
+  async function pickResume(rec: ResumeRecord, file: File) {
+    setPickError(null);
+    const err = await up.resumeFrom(rec, file);
+    if (err) setPickError(err);
+    else setPending(null);
+  }
 
-    setUploadState('creating');
+  async function discardPending() {
+    if (!pending) return;
+    clearResumeRecord();
+    const rec = pending;
+    setPending(null);
+    setDraft(EMPTY_DRAFT);
+    await api
+      .post(`/videos/${rec.video_id}/upload/multipart/${encodeURIComponent(rec.upload_id)}/abort`)
+      .catch(() => undefined);
+  }
+
+  /** PATCH the typed details. Returns false (with the error shown) if they don't validate. */
+  async function saveDetails(): Promise<boolean> {
+    const id = view.videoId;
+    if (!id) return false;
+    const title = draft.title.trim();
+    if (!title) {
+      setTitleError('Give the video a title.');
+      return false;
+    }
+    const body: Record<string, unknown> = {
+      title: title.slice(0, 255),
+      description: draft.description.trim(),
+      access_mode: draft.access_mode,
+      ppv_price_minor_units: null,
+      ppv_price_currency: null,
+    };
+    if (needsPrice(draft.access_mode)) {
+      const p = parsePpvPrice(draft.price, currency);
+      if (!p.ok) {
+        setPriceError(p.error);
+        return false;
+      }
+      // JSON number only at the API boundary; PPV prices are ≤ 200 minor units.
+      body.ppv_price_minor_units = minorToJsonNumber(p.minor);
+      body.ppv_price_currency = currency;
+    }
+    setSaving(true);
     try {
-      // Step 1: Create video
-      const body: Record<string, unknown> = {
-        title: title.trim(),
-        description: description.trim() || null,
-        access_mode: accessMode,
-      };
-      if (accessMode === 'ppv' || accessMode === 'premium_buyable') {
-        body.ppv_price_minor_units = Math.round(parseFloat(ppvPrice) * 100);
-        body.ppv_price_currency = ppvCurrency;
-      }
+      await api.patch(`/videos/${id}`, body);
+      return true;
+    } catch (err) {
+      setSaveNote({ tone: 'error', text: `Details not saved: ${errorMessage(err, 'try again')}.` });
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
 
-      const createRes = await api.post<{
-        video_id: string;
-        upload_url?: string;
-        presigned_url?: string;
-      }>('/videos', body);
+  async function onPublish() {
+    setSaveNote(null);
+    if (!(await saveDetails())) return;
+    if (view.phase === 'ready') await publish();
+    else setAutoPublish(true);
+  }
 
-      const vid = createRes.video_id;
-      setVideoId(vid);
-
-      const uploadUrl = createRes.upload_url ?? createRes.presigned_url;
-      if (!uploadUrl) {
-        throw new Error('No upload URL returned from server.');
-      }
-
-      // Step 2: Upload file via PUT (no auth header for presigned URLs)
-      setUploadState('uploading');
-      await new Promise<void>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', uploadUrl);
-        xhr.setRequestHeader('Content-Type', file.type || 'video/mp4');
-        xhr.upload.addEventListener('progress', (ev) => {
-          if (ev.lengthComputable) {
-            setUploadProgress(Math.round((ev.loaded / ev.total) * 100));
-          }
-        });
-        xhr.addEventListener('load', () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            resolve();
-          } else {
-            reject(new Error(`Upload failed with status ${xhr.status}`));
-          }
-        });
-        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-        xhr.send(file);
+  async function onSaveDraft() {
+    setSaveNote(null);
+    if (await saveDetails()) {
+      setSaveNote({
+        tone: 'success',
+        text: 'Details saved. You can publish from here or later from Videos.',
       });
-
-      // Step 3: Complete upload
-      setUploadState('complete-upload');
-      await api.post(`/videos/${vid}/complete-upload`, {});
-
-      // Step 4: Poll for state
-      setUploadState('processing');
-      pollRef.current = setInterval(async () => {
-        try {
-          const video = await api.get<Video>(`/videos/${vid}`);
-          if (video.state === 'ready') {
-            cleanup();
-            setUploadState('ready');
-          } else if (video.state === 'failed') {
-            cleanup();
-            setUploadState('failed');
-            setError('Transcoding failed. Please try again.');
-          }
-        } catch {
-          // ignore transient errors
-        }
-      }, 3000);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
-      setUploadState('failed');
     }
   }
 
-  async function handlePublish() {
-    if (!videoId) return;
-    setUploadState('publishing');
-    try {
-      await api.post(`/videos/${videoId}/publish`);
-      setUploadState('published');
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Publish failed. Please try again.');
-      setUploadState('ready');
+  // Publish the moment processing finishes, if the creator asked for it.
+  useEffect(() => {
+    if (autoPublish && view.phase === 'ready') {
+      setAutoPublish(false);
+      void publish();
     }
+  }, [autoPublish, view.phase, publish]);
+
+  function startOver() {
+    up.reset();
+    setDraft(EMPTY_DRAFT);
+    setAutoPublish(false);
+    setSaveNote(null);
   }
 
-  // Cleanup on unmount
-  useEffect(() => cleanup, []);
-
-  const isLoading = [
-    'creating',
-    'uploading',
-    'complete-upload',
-    'processing',
-    'publishing',
-  ].includes(uploadState);
+  const showForm = view.phase !== 'published' && view.phase !== 'failed';
+  const idle = view.phase === 'idle';
 
   return (
-    <div>
-      <h1 className="text-2xl font-bold text-white mb-6">Upload Video</h1>
+    <div className="flex flex-col gap-6 max-w-2xl">
+      <PageTitle title="Upload">
+        Uploads keep going through dropped connections. Fill in the details while it uploads.
+      </PageTitle>
 
-      {uploadState === 'published' && videoId ? (
-        <div className="bg-[#16213e] rounded-xl border border-green-700/30 p-8 text-center">
-          <div className="w-16 h-16 rounded-full bg-green-900/30 flex items-center justify-center mx-auto mb-4">
-            <svg
-              className="w-8 h-8 text-green-400"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M5 13l4 4L19 7"
-              />
-            </svg>
-          </div>
-          <h2 className="text-xl font-bold text-white mb-2">Video published!</h2>
-          <p className="text-gray-400 text-sm mb-6">Your video is now live on the platform.</p>
-          <div className="flex gap-3 justify-center">
-            <a
-              href={`/v/${videoId}`}
-              className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2.5 px-6 rounded-lg transition"
-            >
-              View video
-            </a>
-            <button
-              onClick={() => {
-                setUploadState('idle');
-                setTitle('');
-                setDescription('');
-                setFile(null);
-                setVideoId(null);
-                setUploadProgress(0);
-                setError(null);
-              }}
-              className="bg-[#16213e] hover:bg-[#1a2744] text-gray-300 font-semibold py-2.5 px-6 rounded-lg transition border border-gray-700"
-            >
-              Upload another
-            </button>
-          </div>
-        </div>
-      ) : uploadState === 'ready' ? (
-        <div className="bg-[#16213e] rounded-xl border border-[#1a1a2e]/50 p-8 text-center">
-          <div className="w-16 h-16 rounded-full bg-blue-900/30 flex items-center justify-center mx-auto mb-4">
-            <svg
-              className="w-8 h-8 text-blue-400"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
-          </div>
-          <h2 className="text-xl font-bold text-white mb-2">Transcoding complete!</h2>
-          <p className="text-gray-400 text-sm mb-6">
-            Your video is ready. Publish it to make it visible to viewers.
-          </p>
-          <button
-            onClick={() => void handlePublish()}
-            className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-3 px-8 rounded-lg transition"
-          >
-            Publish video
-          </button>
-        </div>
+      {idle && pending ? (
+        <ResumeCard
+          rec={pending}
+          error={pickError}
+          onPick={(f) => void pickResume(pending, f)}
+          onDiscard={() => void discardPending()}
+        />
+      ) : idle ? (
+        <FilePicker onPick={pickNew} error={pickError} />
       ) : (
-        <div className="bg-[#16213e] rounded-xl border border-[#1a1a2e]/50 p-6">
-          {/* Processing indicator */}
-          {uploadState === 'processing' && (
-            <div className="mb-6 bg-blue-900/20 border border-blue-700/30 rounded-lg px-4 py-4 text-center">
-              <div className="flex items-center justify-center gap-3">
-                <div className="w-5 h-5 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-                <p className="text-blue-300 font-medium">
-                  Transcoding your video... this may take a few minutes.
-                </p>
-              </div>
-            </div>
-          )}
+        <ProgressCard
+          view={view}
+          autoPublish={autoPublish}
+          onPause={up.pause}
+          onResume={() => void up.resume()}
+          onCancel={() => {
+            void up.cancel();
+            setDraft(EMPTY_DRAFT);
+            setAutoPublish(false);
+          }}
+          onStartOver={startOver}
+        />
+      )}
 
-          {/* Upload progress */}
-          {uploadState === 'uploading' && (
-            <div className="mb-6">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm text-gray-400">Uploading...</span>
-                <span className="text-sm font-mono text-white">{uploadProgress}%</span>
-              </div>
-              <div className="h-2 bg-[#0f0f23] rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-[#e94560] rounded-full transition-all duration-200"
-                  style={{ width: `${uploadProgress}%` }}
-                />
-              </div>
-            </div>
-          )}
+      {showForm && (
+        <section
+          aria-labelledby="details-h"
+          className="flex flex-col gap-5 rounded border border-line bg-surface p-4 sm:p-5"
+        >
+          <h2 id="details-h" className="text-base font-semibold text-ink">
+            Details
+          </h2>
+          <Field
+            id="upload-title"
+            label="Title"
+            value={draft.title}
+            maxLength={255}
+            onChange={(e) => set('title', e.target.value)}
+            placeholder="e.g. Comedy night at Reps Theatre"
+            error={titleError}
+          />
+          <TextArea
+            label="Description"
+            value={draft.description}
+            onChange={(v) => set('description', v)}
+            hint="Optional. Who's in it, where, what to expect."
+          />
+          <AccessModePicker
+            idPrefix="upload"
+            mode={draft.access_mode}
+            onMode={(m: AccessMode) => set('access_mode', m)}
+            price={draft.price}
+            onPrice={(p) => set('price', p)}
+            currency={currency}
+            error={priceError}
+          />
 
-          <form onSubmit={(e) => void handleSubmit(e)} className="space-y-5">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
-                Title <span className="text-red-400">*</span>
-              </label>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Enter video title"
-                disabled={isLoading}
-                className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-4 py-2.5 w-full focus:outline-none focus:border-[#e94560] transition disabled:opacity-50"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">Description</label>
-              <textarea
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                placeholder="Describe your video..."
-                rows={4}
-                disabled={isLoading}
-                className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-4 py-2.5 w-full focus:outline-none focus:border-[#e94560] transition disabled:opacity-50 resize-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Access mode</label>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-                {(['free', 'ppv', 'premium', 'premium_buyable'] as AccessMode[]).map((mode) => (
-                  <label
-                    key={mode}
-                    className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition ${
-                      accessMode === mode
-                        ? 'border-[#e94560] bg-[#e94560]/10'
-                        : 'border-gray-700 bg-[#0f0f23] hover:border-gray-500'
-                    } ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}
-                  >
-                    <input
-                      type="radio"
-                      name="access_mode"
-                      value={mode}
-                      checked={accessMode === mode}
-                      onChange={() => setAccessMode(mode)}
-                      className="accent-[#e94560]"
-                    />
-                    <span className="text-sm text-gray-300 capitalize">
-                      {mode.replace(/_/g, ' ')}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-
-            {(accessMode === 'ppv' || accessMode === 'premium_buyable') && (
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-1.5">Price</label>
-                <div className="flex gap-3">
-                  <input
-                    type="number"
-                    value={ppvPrice}
-                    onChange={(e) => setPpvPrice(e.target.value)}
-                    placeholder="0.50"
-                    min="0.10"
-                    max="2.00"
-                    step="0.01"
-                    disabled={isLoading}
-                    className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-4 py-2.5 flex-1 focus:outline-none focus:border-[#e94560] transition disabled:opacity-50"
-                  />
-                  <select
-                    value={ppvCurrency}
-                    onChange={(e) => setPpvCurrency(e.target.value)}
-                    disabled={isLoading}
-                    className="bg-[#0f0f23] border border-gray-700 text-white rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#e94560] transition disabled:opacity-50"
-                  >
-                    <option value="USD">USD</option>
-                    <option value="ZWG">ZWG</option>
-                    <option value="ZAR">ZAR</option>
-                  </select>
-                </div>
-                <p className="mt-1 text-xs text-gray-600">
-                  Price range: $0.10 – $2.00 (or equivalent)
-                </p>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-1.5">
-                Video file <span className="text-red-400">*</span>
-              </label>
-              <div
-                onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition ${
-                  file
-                    ? 'border-[#e94560]/50 bg-[#e94560]/5'
-                    : 'border-gray-700 hover:border-gray-500 bg-[#0f0f23]'
-                } ${isLoading ? 'opacity-50 pointer-events-none' : ''}`}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="video/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) setFile(f);
-                  }}
-                  disabled={isLoading}
-                />
-                {file ? (
-                  <div>
-                    <div className="w-10 h-10 rounded-full bg-[#e94560]/20 flex items-center justify-center mx-auto mb-2">
-                      <svg
-                        className="w-5 h-5 text-[#e94560]"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M5 13l4 4L19 7"
-                        />
-                      </svg>
-                    </div>
-                    <p className="text-white font-medium text-sm">{file.name}</p>
-                    <p className="text-gray-500 text-xs mt-1">
-                      {(file.size / 1024 / 1024).toFixed(1)} MB
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="w-10 h-10 rounded-full bg-gray-700/50 flex items-center justify-center mx-auto mb-2">
-                      <svg
-                        className="w-5 h-5 text-gray-500"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-                        />
-                      </svg>
-                    </div>
-                    <p className="text-gray-400 text-sm">Click to select a video file</p>
-                    <p className="text-gray-600 text-xs mt-1">
-                      MP4, MOV, AVI and other formats supported
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {error && (
-              <div className="bg-red-900/30 border border-red-700/50 rounded-lg px-4 py-3 text-sm text-red-300">
-                {error}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-3 px-4 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-            >
-              {uploadState === 'creating' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Creating...
-                </>
-              ) : uploadState === 'uploading' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Uploading {uploadProgress}%...
-                </>
-              ) : uploadState === 'complete-upload' ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Finalizing...
-                </>
-              ) : (
-                'Upload video'
+          {!idle && (
+            <div className="flex flex-col gap-3 border-t border-line pt-4">
+              {saveNote && <Notice tone={saveNote.tone}>{saveNote.text}</Notice>}
+              {view.message && view.phase === 'ready' && (
+                <Notice tone="error">{view.message}</Notice>
               )}
-            </button>
-          </form>
+              {autoPublish ? (
+                <Notice
+                  action={
+                    <Button variant="ghost" size="sm" onClick={() => setAutoPublish(false)}>
+                      Don&rsquo;t
+                    </Button>
+                  }
+                >
+                  Will publish as soon as it&rsquo;s ready. Keep this page open.
+                </Notice>
+              ) : (
+                <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  <Button
+                    variant="secondary"
+                    onClick={() => void onSaveDraft()}
+                    disabled={saving || view.phase === 'starting' || view.phase === 'publishing'}
+                  >
+                    Save draft
+                  </Button>
+                  <Button
+                    size="lg"
+                    icon="check"
+                    onClick={() => void onPublish()}
+                    loading={saving || view.phase === 'publishing'}
+                    disabled={view.phase === 'starting'}
+                    className="sm:min-w-48"
+                  >
+                    {view.phase === 'ready' || view.phase === 'publishing'
+                      ? 'Publish'
+                      : 'Publish when ready'}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function TextArea({
+  label,
+  value,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  hint?: string;
+}) {
+  const id = useId();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label htmlFor={id} className="text-sm font-medium text-ink">
+        {label}
+      </label>
+      <textarea
+        id={id}
+        value={value}
+        maxLength={5000}
+        rows={3}
+        onChange={(e) => onChange(e.target.value)}
+        aria-describedby={hint ? `${id}-hint` : undefined}
+        className="rounded border border-line bg-surface px-3 py-2.5 text-base text-ink placeholder:text-ink-3 outline-none focus:border-accent resize-y"
+      />
+      {hint && (
+        <p id={`${id}-hint`} className="text-xs text-ink-3">
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FilePicker({ onPick, error }: { onPick: (f: File) => void; error: string | null }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <label className="group flex flex-col items-center justify-center gap-3 rounded border-2 border-dashed border-line bg-surface px-4 py-10 text-center cursor-pointer transition-colors hover:border-accent focus-within:border-accent">
+        <input
+          type="file"
+          accept="video/*"
+          className="sr-only"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = '';
+            if (f) onPick(f);
+          }}
+        />
+        <span className="flex h-12 w-12 items-center justify-center rounded-full bg-accent text-on-accent">
+          <Icon name="upload" size={24} />
+        </span>
+        <span className="text-base font-semibold text-ink">Choose a video</span>
+        <span className="text-sm text-ink-3 max-w-xs">
+          MP4 or MOV from your phone or camera. Uploading starts straight away.
+        </span>
+      </label>
+      {error && <Notice tone="error">{error}</Notice>}
+      <p className="flex items-center gap-1.5 text-xs text-ink-3">
+        <Icon name="data" size={14} />
+        Uploading uses data equal to the file size. Wi-Fi saves your bundle.
+      </p>
+    </div>
+  );
+}
+
+function ResumeCard({
+  rec,
+  error,
+  onPick,
+  onDiscard,
+}: {
+  rec: ResumeRecord;
+  error: string | null;
+  onPick: (f: File) => void;
+  onDiscard: () => void;
+}) {
+  return (
+    <section className="flex flex-col gap-4 rounded border border-accent bg-surface p-4 sm:p-5">
+      <div className="flex items-start gap-3">
+        <Icon name="pause" size={20} className="mt-0.5 shrink-0 text-accent" />
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-ink">Finish your upload</h2>
+          <p className="mt-1 text-sm text-ink-2 break-words">
+            <span className="font-semibold text-ink">{rec.file.name}</span> ·{' '}
+            <span className="num">{formatMB(rec.file.size)}</span>. Pick the same file and it
+            carries on from where it stopped — parts already sent aren&rsquo;t sent again.
+          </p>
+        </div>
+      </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <label className="relative inline-flex h-12 items-center justify-center gap-2 rounded bg-accent px-5 text-base font-semibold text-on-accent cursor-pointer hover:bg-accent-strong focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-accent">
+          <input
+            type="file"
+            accept="video/*"
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) onPick(f);
+            }}
+          />
+          <Icon name="upload" size={18} />
+          Pick file to resume
+        </label>
+        <Button variant="ghost" size="lg" onClick={onDiscard}>
+          Discard
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+const STATUS: Record<
+  UploadView['phase'],
+  { label: string; icon: IconName; tone: string; bar: string }
+> = {
+  idle: { label: '', icon: 'upload', tone: 'text-ink', bar: 'bg-accent' },
+  starting: { label: 'Starting', icon: 'spinner', tone: 'text-ink', bar: 'bg-accent' },
+  uploading: { label: 'Uploading', icon: 'upload', tone: 'text-ink', bar: 'bg-accent' },
+  paused: { label: 'Paused', icon: 'pause', tone: 'text-gold', bar: 'bg-ink-3' },
+  finishing: { label: 'Finishing upload', icon: 'spinner', tone: 'text-ink', bar: 'bg-accent' },
+  processing: { label: 'Processing', icon: 'spinner', tone: 'text-ink', bar: 'bg-sage' },
+  ready: { label: 'Ready to publish', icon: 'check', tone: 'text-sage', bar: 'bg-sage' },
+  publishing: { label: 'Publishing', icon: 'spinner', tone: 'text-ink', bar: 'bg-sage' },
+  published: { label: 'Published', icon: 'check', tone: 'text-sage', bar: 'bg-sage' },
+  failed: { label: 'Failed', icon: 'alert', tone: 'text-danger', bar: 'bg-danger' },
+};
+
+function ProgressCard({
+  view,
+  autoPublish,
+  onPause,
+  onResume,
+  onCancel,
+  onStartOver,
+}: {
+  view: UploadView;
+  autoPublish: boolean;
+  onPause: () => void;
+  onResume: () => void;
+  onCancel: () => void;
+  onStartOver: () => void;
+}) {
+  const s = STATUS[view.phase];
+  const uploaded = ['processing', 'ready', 'publishing', 'published'].includes(view.phase);
+  const sent = uploaded ? view.totalBytes : view.sentBytes;
+  const pct = percent(sent, view.totalBytes);
+  const label =
+    view.phase === 'paused'
+      ? view.pauseReason === 'offline'
+        ? 'Paused (offline)'
+        : view.pauseReason === 'user'
+          ? 'Paused'
+          : 'Paused (connection problem)'
+      : s.label;
+  const canCancel = ['starting', 'uploading', 'paused'].includes(view.phase);
+
+  return (
+    <section
+      aria-label="Upload progress"
+      className="flex flex-col gap-3 rounded border border-line bg-surface p-4 sm:p-5"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={`flex items-center gap-2 text-base font-semibold ${s.tone}`}>
+            <Icon name={s.icon} size={18} className="shrink-0" />
+            <output>{label}</output>
+          </p>
+          <p className="mt-0.5 truncate text-sm text-ink-3">{view.fileName}</p>
+        </div>
+        {view.phase !== 'failed' && (
+          <span className="num text-2xl font-bold leading-none text-ink">{pct}%</span>
+        )}
+      </div>
+
+      {view.phase !== 'failed' && (
+        <div aria-hidden className="h-2 overflow-hidden rounded-full bg-surface-2">
+          <div
+            className={`h-full rounded-full transition-[width] ${s.bar}`}
+            style={{ width: `${pct}%` }}
+          />
         </div>
       )}
+
+      {view.phase !== 'failed' && (
+        <p className="num flex flex-wrap gap-x-2 text-sm text-ink-2">
+          <span>
+            {formatMB(sent)} of {formatMB(view.totalBytes)}
+          </span>
+          {view.phase === 'uploading' && view.partCount > 0 && (
+            <span className="text-ink-3">
+              · part {Math.min(view.partsDone + 1, view.partCount)} of {view.partCount}
+            </span>
+          )}
+          {view.phase === 'uploading' && view.etaSeconds !== null && (
+            <span className="text-ink-3">· {formatEta(view.etaSeconds)}</span>
+          )}
+        </p>
+      )}
+
+      {view.phase === 'uploading' && view.retrying && (
+        <p className="text-sm text-gold">
+          Part {view.retrying.part} didn&rsquo;t go through — trying again
+          {view.retrying.inSeconds > 0 ? ` in ${view.retrying.inSeconds}s` : ''} (try{' '}
+          {view.retrying.attempt} of 3).
+        </p>
+      )}
+
+      {view.phase === 'paused' && view.pauseReason === 'offline' && (
+        <p className="text-sm text-ink-2">
+          You&rsquo;re offline. It carries on by itself when you&rsquo;re back online — parts
+          already sent are kept.
+        </p>
+      )}
+      {view.phase === 'paused' && view.message && <Notice tone="warning">{view.message}</Notice>}
+
+      {view.phase === 'processing' && (
+        <p className="text-sm text-ink-2">
+          Upload complete. We&rsquo;re making 240p, 480p and 720p versions so it plays on any bundle
+          — usually a few minutes.{' '}
+          {autoPublish ? '' : 'You can leave this page; it will be in Videos.'}
+        </p>
+      )}
+      {view.phase === 'ready' && (
+        <p className="text-sm text-ink-2">Check the details below, then publish.</p>
+      )}
+      {view.phase === 'failed' && view.message && <Notice tone="error">{view.message}</Notice>}
+
+      {view.phase === 'published' && view.videoId && (
+        <PublishedActions videoId={view.videoId} onAnother={onStartOver} />
+      )}
+
+      {(canCancel || view.phase === 'failed') && (
+        <div className="flex flex-wrap gap-2">
+          {view.phase === 'uploading' && (
+            <Button variant="secondary" icon="pause" onClick={onPause}>
+              Pause
+            </Button>
+          )}
+          {view.phase === 'paused' && (
+            <Button variant="secondary" icon="play" onClick={onResume}>
+              Resume
+            </Button>
+          )}
+          {canCancel && (
+            <Button variant="ghost" onClick={onCancel}>
+              Cancel upload
+            </Button>
+          )}
+          {view.phase === 'failed' && (
+            <Button variant="secondary" icon="upload" onClick={onStartOver}>
+              Upload a different file
+            </Button>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PublishedActions({ videoId, onAnother }: { videoId: string; onAnother: () => void }) {
+  const [copied, setCopied] = useState(false);
+  async function share() {
+    const url = `${window.location.origin}/v/${videoId}`;
+    try {
+      if (navigator.share) {
+        await navigator.share({ url });
+        return;
+      }
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+    } catch {
+      // share sheet dismissed
+    }
+  }
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-sm text-ink-2">It&rsquo;s live. Share it where your fans are.</p>
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Button size="lg" onClick={() => void share()}>
+          {copied ? 'Link copied' : 'Share link'}
+        </Button>
+        <LinkButton href={`/v/${videoId}`} variant="secondary" size="lg">
+          View video
+        </LinkButton>
+        <Button variant="ghost" size="lg" icon="upload" onClick={onAnother}>
+          Upload another
+        </Button>
+      </div>
     </div>
   );
 }

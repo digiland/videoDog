@@ -1,105 +1,142 @@
 'use client';
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
+import { getRefreshToken, isAuthenticated } from '../../src/lib/auth';
+import { signInHref } from '../../src/lib/return-to';
 import type { PaywallPayload } from '../../src/types/api';
-import { formatMoney } from '../../src/lib/format';
+import { LinkButton } from '../../src/ui/button';
+import { Icon } from '../../src/ui/icon';
+import { PriceWithLocal } from '../../src/ui/price';
+import {
+  cheapestPlan,
+  type PlanQuoteJson,
+  planPeriod,
+  primaryOption,
+} from '../../src/ui/viewer-paywall';
 
 interface PaywallProps {
   payload: PaywallPayload;
   videoId: string;
 }
 
+/** "day" → "Day pass". */
+function passName(period: string): string {
+  return `${period.charAt(0).toUpperCase()}${period.slice(1)} pass`;
+}
+
+type Row = {
+  key: 'buy' | 'subscribe';
+  price: PlanQuoteJson['price'];
+  local?: PlanQuoteJson['display_price'];
+  caption: string;
+  action: string;
+  href: string;
+};
+
+/**
+ * One decision, inside the player box: the ways in, cheapest first with the big button.
+ * Prices are the real charge, with a render-only "≈" local amount when the API quotes one.
+ */
 export default function Paywall({ payload, videoId }: PaywallProps) {
-  const hasBuy = Boolean(payload.options.buy);
-  const hasSubscribe = Boolean(payload.options.subscribe?.plans.length);
+  // Read auth on the client only (cookies), after mount, to avoid hydration mismatches.
+  const [signedIn, setSignedIn] = useState(true);
+  useEffect(() => {
+    setSignedIn(isAuthenticated() || Boolean(getRefreshToken()));
+  }, []);
+
+  const returnTo = `/v/${videoId}`;
+  const buy = payload.options.buy;
+  const plans = (payload.options.subscribe?.plans ?? []) as PlanQuoteJson[];
+  const plan = cheapestPlan(plans);
+  const primary = primaryOption(buy, plan);
+
+  const rows: Row[] = [];
+  if (buy) {
+    const purchase = `/purchase/${videoId}`;
+    rows.push({
+      key: 'buy',
+      price: buy.price,
+      local: buy.display_price,
+      caption: 'This video, yours to rewatch',
+      action: 'Buy',
+      // Signed out: sign in first, then land straight on checkout.
+      href: signedIn ? purchase : signInHref(purchase),
+    });
+  }
+  if (plan) {
+    rows.push({
+      key: 'subscribe',
+      price: plan.price,
+      local: plan.display_price,
+      caption: `${passName(planPeriod(plan))} · all Premium videos`,
+      action: 'Get Premium',
+      href: `/pricing?return_to=${encodeURIComponent(returnTo)}`,
+    });
+  }
+  rows.sort((a, b) => (a.key === primary ? -1 : b.key === primary ? 1 : 0));
+
+  const heading =
+    buy && plan
+      ? 'Buy it or watch with Premium'
+      : buy
+        ? 'Unlock this video'
+        : 'Included with Premium';
+  const sub =
+    buy && plan
+      ? 'Pay once for this video, or get every Premium video for a while.'
+      : buy
+        ? 'Pay once with EcoCash. Rewatch any time.'
+        : 'A pass unlocks every Premium video while it lasts.';
 
   return (
-    <div className="bg-[#16213e] rounded-xl border border-[#e94560]/20 p-6 text-center">
-      {/* Lock icon */}
-      <div className="flex justify-center mb-4">
-        <div className="w-16 h-16 rounded-full bg-[#e94560]/10 flex items-center justify-center">
-          <svg
-            className="w-8 h-8 text-[#e94560]"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
+    <section aria-labelledby="paywall-heading" className="flex w-full max-w-md flex-col gap-3 p-4">
+      <div className="flex flex-col gap-0.5">
+        <h2
+          id="paywall-heading"
+          className="flex items-center gap-2 text-base font-bold leading-6 text-ink"
+        >
+          <Icon name="lock" size={18} className="shrink-0 text-accent" />
+          {heading}
+        </h2>
+        <p className="hidden text-sm text-ink-2 sm:block">{sub}</p>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="text-sm text-ink-2">This video can&apos;t be unlocked right now.</p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {rows.map((r) => (
+            <li
+              key={r.key}
+              className="flex items-center justify-between gap-3 rounded border border-line bg-surface px-3 py-2"
+            >
+              <div className="flex min-w-0 flex-col">
+                <PriceWithLocal price={r.price} local={r.local} />
+                <span className="truncate text-xs text-ink-3">{r.caption}</span>
+              </div>
+              <LinkButton
+                href={r.href}
+                variant={r.key === primary ? 'primary' : 'secondary'}
+                className="shrink-0"
+              >
+                {r.action}
+              </LinkButton>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {!signedIn && (
+        <p className="text-sm text-ink-2">
+          Already paid?{' '}
+          <Link
+            href={signInHref(returnTo)}
+            className="inline-flex h-11 items-center font-semibold text-accent hover:underline"
           >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-            />
-          </svg>
-        </div>
-      </div>
-
-      <h2 className="text-xl font-bold text-white mb-2">This video is locked</h2>
-      <p className="text-gray-400 text-sm mb-6">
-        {hasBuy && hasSubscribe
-          ? 'Buy a one-time unlock or subscribe to watch.'
-          : hasBuy
-            ? 'Purchase a one-time unlock to watch this video.'
-            : 'Subscribe to watch this and all premium content.'}
-      </p>
-
-      <div
-        className={`flex flex-col gap-4 ${hasBuy && hasSubscribe ? 'sm:flex-row' : ''} justify-center`}
-      >
-        {/* Buy option */}
-        {hasBuy && payload.options.buy && (
-          <div className="flex-1 bg-[#0f0f23] rounded-xl border border-yellow-700/30 p-5">
-            <div className="text-xs font-semibold text-yellow-400 uppercase tracking-wider mb-2">
-              One-time unlock
-            </div>
-            <div className="text-3xl font-bold text-white mb-4">
-              {formatMoney(
-                payload.options.buy.price.amount_minor,
-                payload.options.buy.price.currency,
-              )}
-            </div>
-            <p className="text-xs text-gray-500 mb-4">Pay once, watch forever</p>
-            <Link
-              href={`/purchase/${videoId}`}
-              className="block w-full bg-yellow-500 hover:bg-yellow-400 text-black font-semibold py-3 px-4 rounded-lg transition text-sm"
-            >
-              Pay with EcoCash
-            </Link>
-          </div>
-        )}
-
-        {/* Subscribe option */}
-        {hasSubscribe && payload.options.subscribe && (
-          <div className="flex-1 bg-[#0f0f23] rounded-xl border border-purple-700/30 p-5">
-            <div className="text-xs font-semibold text-purple-400 uppercase tracking-wider mb-2">
-              Subscribe
-            </div>
-            <div className="space-y-2 mb-4">
-              {payload.options.subscribe.plans.map((plan) => (
-                <div key={plan.id} className="flex items-center justify-between text-sm">
-                  <span className="text-gray-300 capitalize">{plan.code.replace(/_/g, ' ')}</span>
-                  <span className="font-semibold text-white">
-                    {formatMoney(plan.display_price.amount_minor, plan.display_price.currency)}
-                  </span>
-                </div>
-              ))}
-            </div>
-            <p className="text-xs text-gray-500 mb-4">Access all premium content</p>
-            <Link
-              href="/subscriptions"
-              className="block w-full bg-purple-600 hover:bg-purple-500 text-white font-semibold py-3 px-4 rounded-lg transition text-sm"
-            >
-              Subscribe now
-            </Link>
-          </div>
-        )}
-      </div>
-
-      <p className="mt-4 text-xs text-gray-600">
-        <Link href="/sign-in" className="text-[#e94560] hover:underline">
-          Sign in
-        </Link>{' '}
-        if you already have access.
-      </p>
-    </div>
+            Sign in
+          </Link>
+        </p>
+      )}
+    </section>
   );
 }

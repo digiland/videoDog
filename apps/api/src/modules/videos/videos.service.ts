@@ -1,22 +1,26 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, or } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { DB, type Db } from '../../db/db.module';
 import { captions, users as schema_users, videos, purchases } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
+import { PlaybackService } from './playback.service';
+import { VideosRepository } from './videos.repository';
+import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
-import { originalKey, Money } from '@streamzw/shared';
+import { CURRENCY_CODES, originalKey, Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
+import { bullmqConnection } from '../../common/bullmq-connection';
 
 const CreateVideoSchema = z.object({
   title: z.string().min(1).max(255),
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional(),
-  ppv_price_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']).optional(),
+  ppv_price_currency: z.enum(CURRENCY_CODES).optional(),
 });
 
 const UpdateVideoSchema = z.object({
@@ -24,8 +28,17 @@ const UpdateVideoSchema = z.object({
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']).optional(),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional().nullable(),
-  ppv_price_currency: z.enum(['USD', 'ZWG', 'ZAR', 'EUR', 'GBP']).optional().nullable(),
+  ppv_price_currency: z.enum(CURRENCY_CODES).optional().nullable(),
 });
+
+/** 8 MiB parts: above S3's 5 MiB minimum, small enough to retry cheaply on mobile data. */
+const PART_SIZE_BYTES = 8 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
+
+/** Who is asking. `null` = anonymous. */
+export type Viewer = { id: string; role: string } | null;
+
+const AccessModeSchema = z.enum(['free', 'ppv', 'premium', 'premium_buyable']);
 
 @Injectable()
 export class VideosService {
@@ -35,11 +48,13 @@ export class VideosService {
     @Inject(DB) private readonly db: Db,
     private readonly storage: StorageService,
     private readonly access: AccessService,
+    private readonly fx: FxService,
+    private readonly playback: PlaybackService,
+    private readonly repo: VideosRepository,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.transcodeQueue = new Queue('transcode', {
-      connection: { url: redisUrl } as any,
+      connection: bullmqConnection(redisUrl),
     });
   }
 
@@ -56,6 +71,8 @@ export class VideosService {
         'ppv_price_minor_units and ppv_price_currency required for ppv/premium_buyable',
       );
     }
+
+    await this.assertPricingCurrency(ownerId, dto.ppv_price_currency);
 
     const [video] = await this.db
       .insert(videos)
@@ -80,6 +97,87 @@ export class VideosService {
       presigned_url: presignedUrl,
       key,
     };
+  }
+
+  // ─── Resumable multipart upload ──────────────────────────────────────────
+  //
+  // Creators upload over mobile data; a dropped connection should cost one 8 MiB part, not
+  // the whole file. The client PUTs each part to its presigned URL (in any order, retrying
+  // as needed), can ask which parts already landed, then calls complete. Completion lists
+  // the stored parts server-side, so the browser never needs to read ETag headers.
+
+  async startMultipartUpload(videoId: string, ownerId: string, body: unknown) {
+    const parsed = z
+      .object({
+        size_bytes: z.number().int().positive().max(MAX_UPLOAD_BYTES),
+        content_type: z
+          .string()
+          .regex(/^video\/[\w.+-]+$/)
+          .default('video/mp4'),
+      })
+      .safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    const video = await this.getOwned(videoId, ownerId);
+    if (video.state !== 'uploading') throw new ValidationError('Video is not awaiting upload');
+
+    const bucket = this.storage.videoBucketName;
+    const key = originalKey(videoId);
+    const uploadId = await this.storage.createMultipart(bucket, key, parsed.data.content_type);
+    const partCount = Math.ceil(parsed.data.size_bytes / PART_SIZE_BYTES);
+    return {
+      upload_id: uploadId,
+      part_size: PART_SIZE_BYTES,
+      part_count: partCount,
+      parts: await this.presignParts(
+        key,
+        uploadId,
+        Array.from({ length: partCount }, (_, i) => i + 1),
+      ),
+    };
+  }
+
+  /** Resume: which parts are stored, plus fresh URLs for the rest. */
+  async multipartStatus(videoId: string, ownerId: string, uploadId: string, partCount: number) {
+    await this.getOwned(videoId, ownerId);
+    const key = originalKey(videoId);
+    const stored = await this.storage.listParts(this.storage.videoBucketName, key, uploadId);
+    const have = new Set(stored.map((p) => p.partNumber));
+    const missing = Array.from({ length: partCount }, (_, i) => i + 1).filter((n) => !have.has(n));
+    return {
+      uploaded: stored.map((p) => ({ part_number: p.partNumber, size: p.size })),
+      parts: await this.presignParts(key, uploadId, missing),
+    };
+  }
+
+  async completeMultipartUpload(videoId: string, ownerId: string, uploadId: string) {
+    await this.getOwned(videoId, ownerId);
+    const bucket = this.storage.videoBucketName;
+    const key = originalKey(videoId);
+    const parts = await this.storage.listParts(bucket, key, uploadId);
+    if (parts.length === 0) throw new ValidationError('No parts uploaded');
+    await this.storage.completeMultipart(bucket, key, uploadId, parts);
+    return this.completeUpload(videoId, ownerId);
+  }
+
+  async abortMultipartUpload(videoId: string, ownerId: string, uploadId: string) {
+    await this.getOwned(videoId, ownerId);
+    await this.storage.abortMultipart(this.storage.videoBucketName, originalKey(videoId), uploadId);
+    return { ok: true };
+  }
+
+  private presignParts(key: string, uploadId: string, partNumbers: number[]) {
+    return Promise.all(
+      partNumbers.map(async (n) => ({
+        part_number: n,
+        url: await this.storage.presignPart(
+          this.storage.videoBucketName,
+          key,
+          uploadId,
+          n,
+          24 * 3600,
+        ),
+      })),
+    );
   }
 
   async completeUpload(videoId: string, ownerId: string) {
@@ -136,6 +234,37 @@ export class VideosService {
     return updated!;
   }
 
+  /** Take a published video off the catalogue. Buyers keep access (§6: purchases persist). */
+  async unpublish(videoId: string, ownerId: string) {
+    const video = await this.getOwned(videoId, ownerId);
+    assertTransition(video.state, 'unpublished');
+    const [updated] = await this.db
+      .update(videos)
+      .set({ state: 'unpublished', updatedAt: new Date() })
+      .where(eq(videos.id, videoId))
+      .returning();
+    return updated!;
+  }
+
+  /**
+   * Delete a video that never went live (an abandoned or failed upload, or one that's ready
+   * but unpublished and unsold). Anything published or bought stays, for buyers and the ledger.
+   */
+  async deleteDraft(videoId: string, ownerId: string) {
+    const video = await this.getOwned(videoId, ownerId);
+    if (video.publishedAt || !['uploading', 'failed', 'ready'].includes(video.state)) {
+      throw new ValidationError('Only videos that were never published can be deleted');
+    }
+    const [sold] = await this.db
+      .select({ id: purchases.id })
+      .from(purchases)
+      .where(eq(purchases.videoId, videoId))
+      .limit(1);
+    if (sold) throw new ValidationError('This video has purchases and cannot be deleted');
+    await this.db.delete(videos).where(eq(videos.id, videoId));
+    return { ok: true };
+  }
+
   async update(videoId: string, ownerId: string, body: unknown) {
     const parsed = UpdateVideoSchema.safeParse(body);
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
@@ -143,6 +272,7 @@ export class VideosService {
     await this.getOwned(videoId, ownerId);
 
     const dto = parsed.data;
+    await this.assertPricingCurrency(ownerId, dto.ppv_price_currency);
     const [updated] = await this.db
       .update(videos)
       .set({
@@ -161,18 +291,25 @@ export class VideosService {
     return updated!;
   }
 
-  async findById(videoId: string, userId?: string) {
-    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
-
-    if (!video) throw new ResourceNotFoundError('Video');
-
-    let accessCheckResult = null;
-    if (userId) {
-      const user = { id: userId, preferredDisplayCurrency: 'USD' };
-      accessCheckResult = await this.access.checkAccess(user, video);
-    } else {
-      accessCheckResult = await this.access.checkAccess(null, video);
+  /**
+   * §3.5: prices are in the creator's canonical currency, locked when they became a
+   * creator. Viewers see conversions at render time; we never store a converted price.
+   */
+  private async assertPricingCurrency(ownerId: string, currency: string | null | undefined) {
+    if (!currency) return;
+    const [owner] = await this.db
+      .select({ canonical: schema_users.canonicalPricingCurrency })
+      .from(schema_users)
+      .where(eq(schema_users.id, ownerId))
+      .limit(1);
+    if (owner?.canonical && owner.canonical !== currency) {
+      throw new ValidationError(`Prices must be in your pricing currency (${owner.canonical})`);
     }
+  }
+
+  async findById(videoId: string, viewer: Viewer) {
+    const video = await this.getVisible(videoId, viewer);
+    const accessCheckResult = await this.access.checkAccess(await this.accessUser(viewer), video);
 
     const creator = await this.db
       .select({
@@ -206,7 +343,6 @@ export class VideosService {
       in_premium_pool: v.inPremiumPool,
       state: v.state,
       duration_seconds: v.durationSeconds,
-      hls_playlist_key: v.hlsPlaylistKey,
       thumbnail_key: v.thumbnailKey,
       thumbnail_url: await this.thumbnailUrl(v.thumbnailKey),
       published_at: v.publishedAt,
@@ -233,33 +369,65 @@ export class VideosService {
     limit?: number;
     includeUnpublished?: boolean;
   }) {
-    const limit = Math.min(filters.limit ?? 20, 100);
+    const limit = Math.min(Math.max(Number.isFinite(filters.limit) ? filters.limit! : 20, 1), 100);
+    // `mode` is one access mode or a comma-separated list (e.g. "premium,premium_buyable").
+    const mode = filters.mode
+      ? z.array(AccessModeSchema).min(1).max(4).safeParse(filters.mode.split(','))
+      : undefined;
+    if (mode && !mode.success) {
+      throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
+    }
+
+    // Text search: ranked by relevance, one page (rank order has no stable cursor).
+    const q = filters.q?.trim();
+    if (q) {
+      const rows = await this.repo.searchPublished(q.slice(0, 200), mode?.data, limit);
+      return { items: await this.withCreators(rows), next_cursor: null };
+    }
+
     const conditions = [];
     if (!filters.includeUnpublished) {
       conditions.push(eq(videos.state, 'published'));
     }
 
-    if (filters.mode) {
-      conditions.push(
-        eq(videos.accessMode, filters.mode as 'free' | 'ppv' | 'premium' | 'premium_buyable'),
-      );
-    }
+    if (mode?.data) conditions.push(inArray(videos.accessMode, mode.data));
     if (filters.creatorId) {
       conditions.push(eq(videos.ownerId, filters.creatorId));
+    }
+
+    // Keyset pagination on (sort column, id). Public lists sort by publish time; a creator's
+    // own list (which includes drafts with no publish time) sorts by creation time.
+    const sortCol = filters.includeUnpublished ? videos.createdAt : videos.publishedAt;
+    if (filters.cursor) {
+      const [anchor] = await this.db
+        .select({ id: videos.id, at: sortCol })
+        .from(videos)
+        .where(eq(videos.id, filters.cursor))
+        .limit(1);
+      if (!anchor?.at) throw new ValidationError('Invalid cursor');
+      conditions.push(
+        or(lt(sortCol, anchor.at), and(eq(sortCol, anchor.at), lt(videos.id, anchor.id)))!,
+      );
     }
 
     const rows = await this.db
       .select()
       .from(videos)
       .where(and(...conditions))
-      .orderBy(desc(videos.publishedAt))
+      .orderBy(desc(sortCol), desc(videos.id))
       .limit(limit + 1);
 
     const hasMore = rows.length > limit;
     const slice = hasMore ? rows.slice(0, limit) : rows;
 
-    // Join creators in one shot
-    const ownerIds = Array.from(new Set(slice.map((v) => v.ownerId)));
+    const items = await this.withCreators(slice);
+    const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
+
+    return { items, next_cursor };
+  }
+
+  private async withCreators(rows: (typeof videos.$inferSelect)[]) {
+    const ownerIds = Array.from(new Set(rows.map((v) => v.ownerId)));
     const creators = ownerIds.length
       ? await this.db
           .select({
@@ -271,9 +439,8 @@ export class VideosService {
           .where(inArray(schema_users.id, ownerIds))
       : [];
     const byId = new Map(creators.map((c) => [c.id, c]));
-
-    const items = await Promise.all(
-      slice.map(async (v) => {
+    return Promise.all(
+      rows.map(async (v) => {
         const c = byId.get(v.ownerId);
         return {
           ...(await this.serialize(v)),
@@ -281,32 +448,17 @@ export class VideosService {
         };
       }),
     );
-    const next_cursor = hasMore ? (items[items.length - 1]?.id ?? null) : null;
-
-    return { items, next_cursor };
   }
 
-  async getSignedPlaylistUrl(
-    videoId: string,
-    user: { id: string; preferredDisplayCurrency: string } | null,
-  ) {
-    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
+  async getSignedPlaylistUrl(videoId: string, viewer: Viewer, apiBase: string) {
+    const video = await this.getVisible(videoId, viewer);
 
-    if (!video) throw new ResourceNotFoundError('Video');
-    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('HLS playlist');
-
-    const access = await this.access.checkAccess(user, video);
+    // Paywall first: someone without access learns how to unlock, not that media is missing.
+    const access = await this.access.checkAccess(await this.accessUser(viewer), video);
     if (!access.ok) return { access_denied: true, paywall: access.paywall };
+    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('Playable video');
 
-    // Pass-through full URLs (used by test seed data); otherwise treat as a
-    // storage object key and sign a 5-minute GET.
-    const url = /^https?:\/\//i.test(video.hlsPlaylistKey)
-      ? video.hlsPlaylistKey
-      : await this.storage.getPresignedGetUrl(
-          this.storage.videoBucketName,
-          video.hlsPlaylistKey,
-          300,
-        );
+    const grant = await this.playback.grant(video.id, video.hlsPlaylistKey, apiBase);
 
     const captionRows = await this.db
       .select()
@@ -320,11 +472,34 @@ export class VideosService {
         label: c.label,
         kind: c.kind,
         is_default: c.isDefault,
-        url: await this.storage.getPresignedGetUrl(this.storage.videoBucketName, c.key, 300),
+        url: await this.playback.captionUrl(c.key),
       })),
     );
 
-    return { url, captions: signedCaptions };
+    return { ...grant, captions: signedCaptions };
+  }
+
+  /**
+   * Load a video the viewer may see at all: published videos for everyone; anything else
+   * only for its owner or an admin. Others get 404, so drafts don't leak.
+   */
+  async getVisible(videoId: string, viewer: Viewer) {
+    const [video] = await this.db.select().from(videos).where(eq(videos.id, videoId)).limit(1);
+    if (!video) throw new ResourceNotFoundError('Video');
+    const privileged = viewer && (viewer.id === video.ownerId || viewer.role === 'admin');
+    if (video.state !== 'published' && !privileged) throw new ResourceNotFoundError('Video');
+    return video;
+  }
+
+  /** The user shape AccessService needs, with their display currency for paywall quotes. */
+  private async accessUser(viewer: Viewer) {
+    if (!viewer) return null;
+    const [u] = await this.db
+      .select({ id: schema_users.id, currency: schema_users.preferredDisplayCurrency })
+      .from(schema_users)
+      .where(eq(schema_users.id, viewer.id))
+      .limit(1);
+    return u ? { id: u.id, preferredDisplayCurrency: u.currency } : null;
   }
 
   async listCaptions(videoId: string) {
@@ -418,7 +593,7 @@ export class VideosService {
     const dto = parsed.data;
 
     const [video] = await this.db.select().from(videos).where(eq(videos.id, dto.video_id)).limit(1);
-    if (!video) throw new ResourceNotFoundError('Video');
+    if (!video || video.state !== 'published') throw new ResourceNotFoundError('Video');
 
     if (video.accessMode !== 'ppv' && video.accessMode !== 'premium_buyable') {
       throw new ValidationError('Video is not available for individual purchase');
@@ -458,9 +633,9 @@ export class VideosService {
               return r.usd;
             })();
     } else {
-      const rate = await this.fx.rate(video.ppvPriceCurrency as CurrencyCode, paymentCurrency);
-      fxRateId = rate.id === 'identity' ? null : rate.id;
-      chargedAmount = baseMoney.convert(rate, paymentCurrency);
+      const { converted, fxRate } = await this.fx.convert(baseMoney, paymentCurrency);
+      fxRateId = fxRate.id === 'identity' ? null : fxRate.id;
+      chargedAmount = converted;
       const usdResult = await this.fx.convertToUsd(chargedAmount);
       usdEquiv = usdResult.usd;
       if (!fxRateId && usdResult.fxRate.id !== 'identity') fxRateId = usdResult.fxRate.id;

@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Patch,
   Post,
   Query,
@@ -15,9 +16,14 @@ import { RequireAuthGuard } from '../auth/require-auth.guard';
 import { Roles } from '../auth/roles.guard';
 import { RolesGuard } from '../auth/roles.guard';
 import type { AuthenticatedRequest } from '../auth/jwt.guard';
-import { VideosService } from './videos.service';
+import { VideosService, type Viewer } from './videos.service';
 import { z } from 'zod';
 import { ValidationError } from '../auth/errors';
+
+/** JwtGuard attaches `{ id: '' }` for anonymous requests. */
+function viewerOf(req: AuthenticatedRequest): Viewer {
+  return req.user?.id ? { id: req.user.id, role: req.user.role } : null;
+}
 
 @Controller('videos')
 @UseGuards(JwtGuard)
@@ -31,11 +37,74 @@ export class VideosController {
     return this.videos.createUploadSession(req.user.id, body);
   }
 
+  @Post(':id/upload/multipart')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async startMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: unknown,
+  ) {
+    return this.videos.startMultipartUpload(id, req.user.id, body);
+  }
+
+  @Get(':id/upload/multipart/:uploadId')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async multipartStatus(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+    @Query('part_count') partCount: string,
+  ) {
+    const n = Number.parseInt(partCount ?? '', 10);
+    if (!Number.isInteger(n) || n < 1 || n > 10_000) {
+      throw new ValidationError('part_count must be 1–10000');
+    }
+    return this.videos.multipartStatus(id, req.user.id, uploadId, n);
+  }
+
+  @Post(':id/upload/multipart/:uploadId/complete')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async completeMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+  ) {
+    return this.videos.completeMultipartUpload(id, req.user.id, uploadId);
+  }
+
+  @Post(':id/upload/multipart/:uploadId/abort')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async abortMultipart(
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('uploadId') uploadId: string,
+  ) {
+    return this.videos.abortMultipartUpload(id, req.user.id, uploadId);
+  }
+
   @Post(':id/complete-upload')
   @UseGuards(RequireAuthGuard, RolesGuard)
   @Roles('creator', 'admin')
   async completeUpload(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
     return this.videos.completeUpload(id, req.user.id);
+  }
+
+  @Post(':id/unpublish')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async unpublish(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.unpublish(id, req.user.id);
+  }
+
+  @Delete(':id')
+  @UseGuards(RequireAuthGuard, RolesGuard)
+  @Roles('creator', 'admin')
+  async remove(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.deleteDraft(id, req.user.id);
   }
 
   @Patch(':id')
@@ -76,18 +145,19 @@ export class VideosController {
   }
 
   @Get(':id')
-  async findOne(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    return this.videos.findById(id, req.user?.id || undefined);
+  async findOne(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    return this.videos.findById(id, viewerOf(req));
   }
 
   @Get(':id/playlist')
-  async playlist(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
-    const user = req.user?.id ? { id: req.user.id, preferredDisplayCurrency: 'USD' } : null;
-    return this.videos.getSignedPlaylistUrl(id, user);
+  async playlist(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    const apiBase = process.env.PUBLIC_API_BASE ?? `${req.protocol}://${req.get('host')}`;
+    return this.videos.getSignedPlaylistUrl(id, viewerOf(req), apiBase);
   }
 
   @Get(':id/captions')
-  async listCaptions(@Param('id') id: string) {
+  async listCaptions(@Req() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string) {
+    await this.videos.getVisible(id, viewerOf(req));
     return { items: await this.videos.listCaptions(id) };
   }
 

@@ -1,75 +1,75 @@
+import type { Metadata } from 'next';
 import type { Video } from '../../src/types/api';
-import VideoCard from '../components/VideoCard';
+import { EmptyState } from '../../src/ui/state';
+import { API_BASE, apiMode, type ModeKey, parseMode } from '../components/viewer/catalog';
+import ModeChips from '../components/viewer/ModeChips';
+import VideoGrid, { GridSection } from '../components/viewer/VideoGrid';
 import SearchForm from './SearchForm';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+export const metadata: Metadata = { title: 'Search · StreamZW' };
 
-async function searchVideos(q: string): Promise<Video[]> {
-  if (!q.trim()) return [];
+async function searchVideos(q: string, mode: ModeKey): Promise<Video[] | null> {
   try {
-    const res = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}`, { cache: 'no-store' });
-    if (!res.ok) return [];
-    const data = (await res.json()) as { items?: Video[] } | Video[];
-    if (Array.isArray(data)) return data;
+    const params = new URLSearchParams({ q, limit: '48' });
+    const api = apiMode(mode);
+    if (api) params.set('mode', api);
+    const res = await fetch(`${API_BASE}/search?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { items?: Video[] };
     return data.items ?? [];
   } catch {
-    return [];
+    return null;
   }
+}
+
+function href(q: string, mode: ModeKey): string {
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (mode !== 'all') params.set('mode', mode);
+  const s = params.toString();
+  return s ? `/search?${s}` : '/search';
 }
 
 export default async function SearchPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string }>;
+  searchParams: Promise<{ q?: string; mode?: string }>;
 }) {
   const params = await searchParams;
-  const q = params.q ?? '';
-  const results = await searchVideos(q);
+  const q = (params.q ?? '').trim().slice(0, 200);
+  const mode = parseMode(params.mode);
+  const videos = q ? await searchVideos(q, mode) : [];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-white mb-4">Search</h1>
-        <SearchForm initialQuery={q} />
+    <GridSection>
+      <h1 className="sr-only">Search</h1>
+      <div className="flex flex-col gap-3 md:max-w-xl">
+        <SearchForm key={q} initialQuery={q} mode={mode} />
       </div>
+      {q && <ModeChips active={mode} hrefFor={(m) => href(q, m)} />}
 
-      {q && (
-        <p className="text-gray-400 text-sm mb-6">
-          {results.length === 0
-            ? `No results for "${q}"`
-            : `${results.length} result${results.length === 1 ? '' : 's'} for "${q}"`}
-        </p>
-      )}
-
-      {results.length > 0 ? (
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
-          {results.map((video) => (
-            <VideoCard key={video.id} video={video} />
-          ))}
-        </div>
-      ) : q ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="w-16 h-16 rounded-full bg-[#16213e] flex items-center justify-center mb-4">
-            <svg
-              className="w-8 h-8 text-gray-600"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-              />
-            </svg>
-          </div>
-          <p className="text-gray-400 text-lg font-medium">No results for &ldquo;{q}&rdquo;</p>
-          <p className="text-gray-600 text-sm mt-1">Try different keywords or check for typos.</p>
-        </div>
+      {!q ? (
+        <EmptyState title="Find something to watch">
+          Search by title, topic or creator, like &ldquo;mbira&rdquo; or &ldquo;football&rdquo;.
+        </EmptyState>
+      ) : videos === null ? (
+        <EmptyState title="Search isn't working right now">
+          Check your connection, then search again.
+        </EmptyState>
+      ) : videos.length === 0 ? (
+        <EmptyState title={`Nothing found for “${q}”`}>
+          {mode === 'all'
+            ? 'Try fewer or different words.'
+            : 'Try another filter, or fewer or different words.'}
+        </EmptyState>
       ) : (
-        <p className="text-gray-600 text-center py-16">Enter a search term above to find videos.</p>
+        <section aria-labelledby="results-heading" className="flex flex-col gap-3">
+          <h2 id="results-heading" className="text-sm text-ink-3 num">
+            {videos.length} {videos.length === 1 ? 'result' : 'results'} for &ldquo;{q}&rdquo;
+          </h2>
+          <VideoGrid videos={videos} label="Search results" />
+        </section>
       )}
-    </div>
+    </GridSection>
   );
 }

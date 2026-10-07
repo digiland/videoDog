@@ -1,152 +1,73 @@
 'use client';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import { isAuthenticated, getUser } from '../../src/lib/auth';
+import { getUser, isAuthenticated } from '../../src/lib/auth';
+import { signInHref } from '../../src/lib/return-to';
 
-const NAV_ITEMS = [
-  {
-    href: '/studio/earnings',
-    label: 'Earnings',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: '/studio/videos',
-    label: 'Videos',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M15 10l4.553-2.276A1 1 0 0121 8.723v6.554a1 1 0 01-1.447.894L15 14M4 6h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2z"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: '/studio/upload',
-    label: 'Upload',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-        />
-      </svg>
-    ),
-  },
-  {
-    href: '/studio/payouts',
-    label: 'Payouts',
-    icon: (
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          strokeWidth={2}
-          d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"
-        />
-      </svg>
-    ),
-  },
-];
+const TABS = [
+  { href: '/studio', label: 'Overview', exact: true },
+  { href: '/studio/upload', label: 'Upload' },
+  { href: '/studio/videos', label: 'Videos' },
+  { href: '/studio/earnings', label: 'Earnings' },
+  { href: '/studio/payouts', label: 'Payouts' },
+] as const;
 
+/**
+ * Studio sub-navigation is a scrollable tab strip at the top of the studio area, on every
+ * screen size: the app's bottom tab bar already owns the thumb zone on phones.
+ */
 export default function StudioLayout({ children }: { children: ReactNode }) {
-  const pathname = usePathname();
+  const pathname = usePathname() ?? '/studio';
   const router = useRouter();
+  const activeRef = useRef<HTMLAnchorElement | null>(null);
 
   useEffect(() => {
     if (!isAuthenticated()) {
-      router.push('/sign-in');
+      router.replace(signInHref(pathname));
       return;
     }
     const user = getUser();
-    if (user && user.role !== 'creator' && user.role !== 'admin') {
-      router.push('/');
-    }
-  }, [router]);
+    if (user && user.role !== 'creator' && user.role !== 'admin') router.replace('/');
+  }, [router, pathname]);
+
+  // Keep the current tab in view when the strip is scrolled on a narrow phone.
+  useEffect(() => {
+    activeRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, []);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex flex-col md:flex-row gap-6">
-        {/* Sidebar (desktop) / Tab bar (mobile) */}
-        <aside className="md:w-56 shrink-0">
-          <div className="md:bg-[#16213e] md:rounded-xl md:border md:border-[#1a1a2e]/50 md:p-3">
-            <p className="hidden md:block text-xs font-semibold text-gray-500 uppercase tracking-wider px-3 mb-2">
-              Creator Studio
-            </p>
-
-            {/* Mobile: horizontal tabs */}
-            <div className="flex md:hidden gap-1 overflow-x-auto pb-1 mb-4">
-              {NAV_ITEMS.map((item) => (
+    <div className="max-w-screen-xl mx-auto px-4">
+      <nav aria-label="Studio" className="-mx-4 border-b border-line md:mx-0">
+        <ul className="no-scrollbar flex overflow-x-auto px-2 md:px-0">
+          {TABS.map((t) => {
+            const active =
+              'exact' in t && t.exact ? pathname === t.href : pathname.startsWith(t.href);
+            return (
+              <li key={t.href} className="shrink-0">
                 <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition ${
-                    pathname === item.href
-                      ? 'bg-[#e94560] text-white'
-                      : 'bg-[#16213e] text-gray-400 hover:text-white'
+                  ref={active ? activeRef : undefined}
+                  href={t.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={`relative flex h-12 items-center px-3 text-sm font-semibold transition-colors ${
+                    active ? 'text-ink' : 'text-ink-3 hover:text-ink'
                   }`}
                 >
-                  {item.icon}
-                  {item.label}
-                </Link>
-              ))}
-            </div>
-
-            {/* Desktop: vertical nav */}
-            <nav className="hidden md:flex flex-col gap-1">
-              {NAV_ITEMS.map((item) => (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition ${
-                    pathname === item.href
-                      ? 'bg-[#e94560] text-white'
-                      : 'text-gray-400 hover:text-white hover:bg-[#1a2744]'
-                  }`}
-                >
-                  {item.icon}
-                  {item.label}
-                </Link>
-              ))}
-
-              <div className="mt-2 pt-2 border-t border-gray-700/50">
-                <Link
-                  href="/"
-                  className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-gray-600 hover:text-gray-400 transition"
-                >
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M10 19l-7-7m0 0l7-7m-7 7h18"
+                  {t.label}
+                  {active && (
+                    <span
+                      aria-hidden
+                      className="absolute inset-x-3 bottom-0 h-0.5 rounded-full bg-accent"
                     />
-                  </svg>
-                  Back to site
+                  )}
                 </Link>
-              </div>
-            </nav>
-          </div>
-        </aside>
-
-        {/* Main content */}
-        <div className="flex-1 min-w-0">{children}</div>
-      </div>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+      <div className="py-5 md:py-8">{children}</div>
     </div>
   );
 }

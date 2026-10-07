@@ -1,5 +1,52 @@
 # StreamZW — implementation review (2026-05-26)
 
+> **Status update (2026-10-06).** The money-path fixes below landed together, with
+> integration tests against real Postgres (`apps/api/src/**/*.int.test.ts`, run in CI).
+> Items marked ✅ are fixed; the original review follows unchanged for history.
+>
+> - ✅ Build: `main` compiles again (missing `Inject` import, `FxService` injection, `@nestjs/schedule` dependency); web and shared lint pass.
+> - ✅ Payment amounts are server-derived: `POST /payments` charges the pending purchase/subscription the caller owns; only tips take a client amount. Provider must match the charge currency; ZIPIT/Paystack are refused until implemented.
+> - ✅ Webhook settlement is one DB transaction with the payment row `FOR UPDATE`: concurrent duplicates settle once, a crash part-way rolls back for the retry. Signature is checked over the raw body with the payment's own provider; production refuses to boot without `ECOCASH_WEBHOOK_SECRET`.
+> - ✅ Tips credit the creator (90/10) in any currency; a second payment for an already-unlocked video is booked to `refunds_due`, not double-credited.
+> - ✅ Payouts: balance check + debit under an advisory lock; always paid to the profile's `payout_msisdn`; ZWG/ZAR payouts convert from `creator_balance.USD` through `fx_holding`.
+> - ✅ Subscription renewals actually charge the provider (stored `payer_msisdn`), retry daily through the 3-day grace, and never stack a charge on an open attempt.
+> - ✅ Premium pool: 45% of subscription revenue now moves to `platform_revenue` in the same transaction as the 55% creator split; CAT month boundaries; deterministic odd-cent allocation; daily `watch.aggregate` job is now scheduled (nothing enqueued it before, so the pool paid nobody).
+> - ✅ Watch time: 4 counted heartbeats = 1 minute, via one conditional UPDATE (no double-count under concurrency).
+> - ✅ Refresh tokens: rotation claimed atomically; reuse revokes the whole forward chain.
+> - ✅ BullMQ connections now honour `REDIS_URL` (ioredis has no `url` option, so every queue was silently on localhost).
+> - ✅ System ledger accounts are unique even with `owner_id IS NULL` (migration 0013).
+>
+> **Second pass (same day): remaining items + video playback.**
+>
+> - ✅ §3.12 reconciliation: one locked settle path for webhooks, `GET /payments/:id` polls and a 5-minute sweep that asks the provider about stale payments.
+> - ✅ Payout processor (every 10 min): atomic claim → EcoCash disbursement → ledger completion, or full reversal on rejection; unknown outcomes held for manual reconciliation. ZAR payouts refused until a rail exists.
+> - ✅ Payout number changes require a fresh OTP (`POST /users/me/payout-msisdn`); OTP attempts are counted atomically and codes are single-use; dev OTP logging needs `DEV_LOG_OTP=true`.
+> - ✅ Paystack card rail (ZAR/USD) with signed webhooks and verify-before-settle (amount and currency must match).
+> - ✅ National IDs AES-256-GCM encrypted in `national_ids` with HMAC dedupe; admin verification sets `id_verified` (§3.15).
+> - ✅ FX: rates are stored USD→X, so X→USD lookups failed — every non-USD payment errored. Lookups now use the reverse pair and cross pairs go through USD.
+> - ✅ Paywall quotes the viewer's display currency (render-only); creators must price in their canonical currency (§3.5).
+> - ✅ Search: no longer returns raw rows (storage keys leaked); web search had always shown "No results" (`items` vs `results`); `/videos?q=` works; pagination cursor works.
+> - ✅ Raw SQL lives in `*.repository.ts`; aggregates use typed Drizzle helpers; shared `CURRENCY_CODES`; no `as any`.
+> - ✅ Resumable multipart uploads (8 MiB parts) for creators on mobile data.
+>
+> **Video playback** (end-to-end tested: upload → transcode → paywall → EcoCash purchase → HLS decode):
+>
+> - ✅ Transcoded videos could not play: only the master playlist was presigned, so renditions and segments in the private bucket returned 403. Playback grants are now a BunnyCDN directory token or API-served playlists (`/playback/:id/:token/…`) with presigned segments.
+> - ✅ Subscribers, buyers and owners always saw the paywall: the video page checked access server-side without the user's token. The paywall's buy/subscribe links pointed to pages that didn't exist, and subscribing never took payment. The web app now has a working EcoCash checkout.
+> - ✅ The player never sent heartbeats (`id` vs `session_id`), so no watch time was recorded and the premium pool could never pay out.
+> - ✅ Watch sessions require access, one live stream per viewer, creators' own views excluded from pool minutes.
+> - ✅ Drafts are hidden from non-owners; storage keys are no longer in video JSON.
+> - ✅ Transcoder: single ffmpeg pass, 240/480/720/1080p without upscaling, aligned keyframes, CODECS in master, 64 kbps audio on low renditions, streamed I/O, failed only after retries.
+> - ✅ The AWS SDK's default checksums stored `aws-chunked` framing inside uploaded objects on S3-compatible stores, corrupting video files.
+>
+> **Still open / needs a decision:**
+>
+> - **Production provider endpoints.** EcoCash merchant API paths are placeholders until the real spec is available. Paystack follows its public API but is untested against a live account. BunnyCDN token signing follows Bunny's documented scheme but is untested against a real pull zone.
+> - **ZIPIT** has no public merchant API, so it needs a bank or aggregator partner.
+> - **Card subscriptions don't auto-renew.** Renewing Paystack-paid subscriptions needs stored card authorizations (`charge_authorization`).
+> - **Not built yet:** notifications (payment_completed etc.), trending/view counts, offline downloads (mobile, M11).
+> - **Validation location:** request bodies are still parsed with Zod inside services rather than a shared pipe. The behaviour is consistent; this is a style refactor.
+
 Review of `apps/`, `packages/`, `infra/` against `tickets/M01–M10` and the §3 invariants in [CLAUDE.md](../CLAUDE.md). M11 (Flutter) is deferred per memory.
 
 ## TL;DR

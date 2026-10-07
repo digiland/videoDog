@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, eq, gte, lt, sum } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { accounts, ledgerEntries } from '../../db/schema';
 import { Money } from '@streamzw/shared';
@@ -36,7 +36,7 @@ export class EarningsService {
     const entries = await this.db
       .select({
         refType: ledgerEntries.refType,
-        total: sql<string>`SUM(credit_minor::bigint)`,
+        total: sum(ledgerEntries.creditMinor),
       })
       .from(ledgerEntries)
       .where(

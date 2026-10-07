@@ -3,6 +3,12 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../../../src/lib/api';
 import { getUser, isAuthenticated } from '../../../src/lib/auth';
+import { Button } from '../../../src/ui/button';
+import { Notice } from '../../../src/ui/notice';
+import { EmptyState, Skeleton } from '../../../src/ui/state';
+import { errorText } from '../../components/account/errors';
+import { formatPhone } from '../../../src/lib/phone';
+import { shortDate } from '../../components/account/subscription';
 
 interface Application {
   id: string;
@@ -14,123 +20,155 @@ interface Application {
   canonicalPricingCurrency: string | null;
 }
 
+type Decision = 'pending' | 'approved' | 'rejected';
+
+const CHIP: Record<Decision, { label: string; tone: string }> = {
+  pending: { label: 'Pending', tone: 'text-gold' },
+  approved: { label: 'Approved', tone: 'text-sage' },
+  rejected: { label: 'Rejected', tone: 'text-ink-3' },
+};
+
+function Chip({ children, tone }: { children: React.ReactNode; tone: string }) {
+  return (
+    <span
+      className={`inline-flex items-center h-6 px-2 rounded-full bg-surface-2 text-xs font-semibold num ${tone}`}
+    >
+      {children}
+    </span>
+  );
+}
+
 export default function AdminApplicationsPage() {
   const router = useRouter();
   const [items, setItems] = useState<Application[] | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [decisions, setDecisions] = useState<Record<string, Decision>>({});
+  const [busy, setBusy] = useState<{ id: string; action: 'approve' | 'reject' } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isAuthenticated()) {
-      router.push('/sign-in');
+      router.push('/sign-in?return_to=%2Fadmin%2Fapplications');
       return;
     }
-    const u = getUser();
-    if (u?.role !== 'admin') {
+    if (getUser()?.role !== 'admin') {
       router.push('/');
       return;
     }
-    void load();
+    void (async () => {
+      try {
+        const data = await api.get<{ items: Application[] }>('/admin/creator-applications');
+        setItems(data.items);
+      } catch (err: unknown) {
+        setError(errorText(err, 'Applications did not load. Try again.'));
+        setItems([]);
+      }
+    })();
   }, [router]);
 
-  async function load() {
+  async function decide(id: string, action: 'approve' | 'reject') {
+    setBusy({ id, action });
+    setError(null);
     try {
-      const data = await api.get<{ items: Application[] }>('/admin/creator-applications');
-      setItems(data.items);
+      await api.post(`/admin/creator-applications/${encodeURIComponent(id)}/${action}`);
+      // Keep the row with its new state, so the list doesn't jump under the next tap.
+      setDecisions((d) => ({ ...d, [id]: action === 'approve' ? 'approved' : 'rejected' }));
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to load');
+      setError(errorText(err, 'That did not go through. Try again.'));
+    } finally {
+      setBusy(null);
     }
   }
 
-  async function decide(id: string, action: 'approve' | 'reject') {
-    setBusyId(id);
-    try {
-      await api.post(`/admin/creator-applications/${id}/${action}`);
-      setItems((prev) => prev?.filter((a) => a.id !== id) ?? null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed');
-    } finally {
-      setBusyId(null);
-    }
-  }
+  const pendingCount = items?.filter((a) => !decisions[a.id]).length ?? 0;
 
   return (
-    <div className="max-w-5xl mx-auto px-6 py-10 fade-up">
-      <div className="flex items-center gap-2 mb-1">
-        <span className="text-xs font-semibold uppercase tracking-wide bg-warn/15 text-warn px-2 py-0.5 rounded">
-          Admin
-        </span>
-      </div>
-      <h1 className="text-3xl font-bold">Creator applications</h1>
-      <p className="text-ink-mute mt-1">
-        Approve to grant creator privileges and unlock the studio.
-      </p>
-
-      {error && (
-        <div className="mt-6 bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-          {error}
+    <div className="max-w-screen-lg mx-auto px-4 pt-6 pb-10 flex flex-col gap-6 sm:pt-10">
+      <header className="flex flex-col gap-2">
+        <div>
+          <Chip tone="text-gold">Admin</Chip>
         </div>
-      )}
+        <h1 className="text-2xl font-bold text-ink">Creator applications</h1>
+        <p className="text-base text-ink-2">
+          Approving lets them upload, price videos and get paid.{' '}
+          {items && items.length > 0 && (
+            <span className="num text-ink">{pendingCount} waiting.</span>
+          )}
+        </p>
+      </header>
 
-      <div className="mt-8 space-y-4">
-        {items === null ? (
-          <div className="bg-bg-elev border border-line rounded-lg p-10 text-center text-ink-dim text-sm">
-            Loading…
+      {error && <Notice tone="error">{error}</Notice>}
+
+      {items === null ? (
+        <div className="flex flex-col gap-3" aria-busy>
+          {[0, 1, 2].map((k) => (
+            <Skeleton key={k} className="h-28" />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        !error && (
+          <div className="rounded border border-line">
+            <EmptyState title="All clear">No one is waiting for a decision.</EmptyState>
           </div>
-        ) : items.length === 0 ? (
-          <div className="bg-bg-elev border border-line rounded-lg p-10 text-center">
-            <p className="text-lg font-semibold">All clear</p>
-            <p className="text-ink-dim text-sm mt-1">No pending applications.</p>
-          </div>
-        ) : (
-          items.map((a) => (
-            <article
-              key={a.id}
-              className="bg-bg-elev border border-line rounded-lg p-6 grid md:grid-cols-12 gap-4"
-            >
-              <div className="md:col-span-3">
-                <p className="text-xs text-ink-dim uppercase tracking-wide">Applicant</p>
-                <p className="font-semibold mt-1">{a.displayName ?? a.handle ?? 'Unnamed'}</p>
-                <p className="text-xs text-ink-dim font-mono mt-1">{a.phoneE164}</p>
-                <div className="mt-3 text-xs text-ink-mute space-y-1">
-                  <div>
-                    Currency:{' '}
-                    <span className="font-mono text-ink">{a.canonicalPricingCurrency ?? '—'}</span>
+        )
+      ) : (
+        <ul className="flex flex-col rounded border border-line divide-y divide-line">
+          {items.map((a) => {
+            const state: Decision = decisions[a.id] ?? 'pending';
+            const chip = CHIP[state];
+            const rowBusy = busy?.id === a.id;
+            return (
+              <li
+                key={a.id}
+                className={`flex flex-col gap-3 p-4 md:flex-row md:items-start md:gap-6 ${
+                  state === 'pending' ? '' : 'opacity-70'
+                }`}
+              >
+                <div className="flex flex-col gap-1 md:w-60 md:shrink-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-base font-semibold text-ink break-words">
+                      {a.displayName ?? a.handle ?? 'No name yet'}
+                    </p>
+                    <Chip tone={chip.tone}>{chip.label}</Chip>
                   </div>
-                  <div>
-                    Applied:{' '}
-                    {a.creatorApplicationAt
-                      ? new Date(a.creatorApplicationAt).toLocaleString()
-                      : '—'}
+                  <p className="text-sm text-ink-2 num">{formatPhone(a.phoneE164)}</p>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-ink-3">
+                    <Chip tone="text-ink-2">Prices in {a.canonicalPricingCurrency ?? 'USD'}</Chip>
+                    {a.creatorApplicationAt && (
+                      <span className="num">Applied {shortDate(a.creatorApplicationAt)}</span>
+                    )}
                   </div>
                 </div>
-              </div>
-              <div className="md:col-span-6">
-                <p className="text-xs text-ink-dim uppercase tracking-wide">Pitch</p>
-                <p className="text-sm mt-1 whitespace-pre-wrap">
-                  {a.creatorApplicationPitch ?? '—'}
+                <p className="flex-1 min-w-0 text-sm text-ink whitespace-pre-wrap break-words">
+                  {a.creatorApplicationPitch ?? (
+                    <span className="text-ink-3">No pitch written.</span>
+                  )}
                 </p>
-              </div>
-              <div className="md:col-span-3 flex md:flex-col gap-2">
-                <button
-                  onClick={() => void decide(a.id, 'approve')}
-                  disabled={busyId === a.id}
-                  className="flex-1 bg-ok hover:opacity-90 text-bg font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => void decide(a.id, 'reject')}
-                  disabled={busyId === a.id}
-                  className="flex-1 bg-surface hover:bg-surface-2 text-ink-mute hover:text-ink font-semibold py-2 px-4 rounded-md text-sm transition disabled:opacity-50"
-                >
-                  Reject
-                </button>
-              </div>
-            </article>
-          ))
-        )}
-      </div>
+                {state === 'pending' && (
+                  <div className="flex gap-2 md:flex-col md:w-32 md:shrink-0">
+                    <Button
+                      className="flex-1 md:flex-none"
+                      loading={rowBusy && busy?.action === 'approve'}
+                      disabled={rowBusy}
+                      onClick={() => void decide(a.id, 'approve')}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      className="flex-1 md:flex-none"
+                      loading={rowBusy && busy?.action === 'reject'}
+                      disabled={rowBusy}
+                      onClick={() => void decide(a.id, 'reject')}
+                    >
+                      Reject
+                    </Button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

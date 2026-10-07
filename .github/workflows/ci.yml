@@ -54,6 +54,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The transcoder tests run real ffmpeg (they skip if it's missing).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
       - run: pnpm --filter api migrate
 
       - run: pnpm lint

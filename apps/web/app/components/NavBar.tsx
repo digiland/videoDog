@@ -1,32 +1,20 @@
 'use client';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { clearTokens, getUser, isAuthenticated } from '../../src/lib/auth';
+import { clearTokens, getRefreshToken, getUser, isAuthenticated } from '../../src/lib/auth';
 import { api } from '../../src/lib/api';
+import { signInHref } from '../../src/lib/return-to';
+import { Icon, type IconName } from '../../src/ui/icon';
+import { LinkButton } from '../../src/ui/button';
 
 type Role = 'viewer' | 'creator' | 'admin';
 
-const ROLE_BADGE: Record<Role, { label: string; tone: string }> = {
-  viewer: { label: 'Viewer', tone: 'bg-surface text-ink-mute' },
-  creator: { label: 'Creator', tone: 'bg-accent/15 text-accent' },
-  admin: { label: 'Admin', tone: 'bg-warn/15 text-warn' },
-};
-
-export default function NavBar() {
-  const router = useRouter();
-  const [authed, setAuthed] = useState(false);
+function useSession() {
   const [user, setUser] = useState<{ id: string; role: Role } | null>(null);
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
-    function refresh() {
-      const ok = isAuthenticated();
-      setAuthed(ok);
-      setUser(ok ? (getUser() as { id: string; role: Role } | null) : null);
-    }
+    const refresh = () =>
+      setUser(isAuthenticated() ? (getUser() as { id: string; role: Role } | null) : null);
     refresh();
     window.addEventListener('streamzw:auth-change', refresh);
     window.addEventListener('focus', refresh);
@@ -35,191 +23,225 @@ export default function NavBar() {
       window.removeEventListener('focus', refresh);
     };
   }, []);
+  return user;
+}
+
+export function Wordmark() {
+  return (
+    <span className="text-lg font-bold tracking-tight text-ink">
+      Stream<span className="text-accent">ZW</span>
+    </span>
+  );
+}
+
+/**
+ * App shell navigation. Phones get a bottom tab bar in thumb reach (the primary device);
+ * wider screens get links and search in the top bar.
+ */
+export default function NavBar() {
+  const user = useSession();
+  const pathname = usePathname() ?? '/';
+  const router = useRouter();
+  const [q, setQ] = useState('');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const isCreator = user?.role === 'creator' || user?.role === 'admin';
 
   useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setDropdownOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+    if (!menuOpen) return;
+    const close = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [menuOpen]);
 
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    if (searchQuery.trim()) router.push(`/search?q=${encodeURIComponent(searchQuery.trim())}`);
-  }
-
-  async function handleSignOut() {
+  async function signOut() {
     try {
-      await api.post('/auth/logout');
+      // Send the refresh token so the server revokes it, not just this browser's copy.
+      await api.post('/auth/logout', { refresh_token: getRefreshToken() });
     } catch {
-      /* ignore */
+      // signing out locally is what matters
     }
     clearTokens();
     window.location.assign('/');
   }
 
-  const role: Role = user?.role ?? 'viewer';
-  const badge = ROLE_BADGE[role];
-  const canUpload = role === 'creator' || role === 'admin';
+  const tabs: { href: string; label: string; icon: IconName; match: (p: string) => boolean }[] = [
+    { href: '/', label: 'Home', icon: 'home', match: (p) => p === '/' || p.startsWith('/v/') },
+    { href: '/search', label: 'Search', icon: 'search', match: (p) => p.startsWith('/search') },
+    isCreator
+      ? { href: '/studio', label: 'Studio', icon: 'studio', match: (p) => p.startsWith('/studio') }
+      : {
+          href: '/pricing',
+          label: 'Premium',
+          icon: 'play',
+          match: (p) => p.startsWith('/pricing'),
+        },
+    {
+      href: user ? '/me' : signInHref(pathname),
+      label: user ? 'You' : 'Sign in',
+      icon: 'user',
+      match: (p) => p.startsWith('/me') || p.startsWith('/sign-in'),
+    },
+  ];
+
+  const desktopLinks = [
+    { href: '/', label: 'Home' },
+    { href: '/pricing', label: 'Premium' },
+    ...(isCreator ? [{ href: '/studio', label: 'Studio' }] : []),
+  ];
 
   return (
-    <nav className="sticky top-0 z-50 bg-bg/95 backdrop-blur border-b border-line">
-      <div className="max-w-screen-2xl mx-auto px-6 h-14 flex items-center gap-6">
-        <Link href="/" className="text-xl font-bold tracking-tight shrink-0">
-          Stream<span className="text-accent">ZW</span>
-        </Link>
+    <>
+      <header
+        className="sticky z-40 bg-bg border-b border-line"
+        style={{ top: 'env(safe-area-inset-top, 0px)' }}
+      >
+        <div className="max-w-screen-xl mx-auto px-4 h-14 flex items-center gap-4">
+          <Link href="/" aria-label="StreamZW home" className="shrink-0">
+            <Wordmark />
+          </Link>
 
-        <div className="hidden md:flex items-center gap-5 text-sm text-ink-mute">
-          <Link href="/" className="hover:text-ink transition">
-            Home
-          </Link>
-          <Link href="/?mode=free" className="hover:text-ink transition">
-            Free
-          </Link>
-          <Link href="/?mode=premium" className="hover:text-ink transition">
-            Premium
-          </Link>
-          <Link href="/pricing" className="hover:text-ink transition">
-            Subscribe
-          </Link>
-        </div>
-
-        <form onSubmit={handleSearch} className="flex-1 max-w-md ml-auto">
-          <div className="relative">
-            <svg
-              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-dim"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={1.5}
-                d="M21 21l-4.35-4.35M10 17a7 7 0 110-14 7 7 0 010 14z"
-              />
-            </svg>
-            <input
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search videos, creators…"
-              className="w-full bg-surface border border-line focus:border-accent rounded-md pl-9 pr-3 py-1.5 text-sm placeholder:text-ink-dim text-ink focus:outline-none transition"
-            />
-          </div>
-        </form>
-
-        <div className="flex items-center gap-3 shrink-0">
-          {authed && canUpload && (
-            <Link
-              href="/studio/upload"
-              className="hidden sm:inline-flex items-center gap-1.5 bg-accent hover:bg-accent-hot text-bg rounded-md px-3 py-1.5 text-sm font-semibold transition"
-            >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2.5}
+          <nav className="hidden md:flex items-center gap-1 text-sm" aria-label="Main">
+            {desktopLinks.map(({ href, label }) => (
+              <Link
+                key={href}
+                href={href}
+                className={`px-3 h-9 inline-flex items-center rounded ${
+                  (href === '/' ? pathname === '/' : pathname.startsWith(href))
+                    ? 'text-ink bg-surface-2'
+                    : 'text-ink-2 hover:text-ink'
+                }`}
               >
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
-              </svg>
-              Upload
-            </Link>
-          )}
+                {label}
+              </Link>
+            ))}
+          </nav>
 
-          {authed ? (
-            <div className="relative" ref={dropdownRef}>
-              <button
-                onClick={() => setDropdownOpen((v) => !v)}
-                className="flex items-center gap-2 hover:bg-surface rounded-md px-2 py-1.5 transition"
+          <search className="hidden md:flex flex-1 max-w-sm ml-auto">
+            <form
+              className="flex w-full"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (q.trim()) router.push(`/search?q=${encodeURIComponent(q.trim())}`);
+              }}
+            >
+              <label htmlFor="nav-search" className="sr-only">
+                Search videos
+              </label>
+              <div className="flex items-center w-full h-9 gap-2 px-3 rounded border border-line bg-surface focus-within:border-accent">
+                <Icon name="search" size={16} className="text-ink-3" />
+                <input
+                  id="nav-search"
+                  type="search"
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search videos and creators"
+                  className="flex-1 min-w-0 bg-transparent text-sm text-ink placeholder:text-ink-3 outline-none"
+                />
+              </div>
+            </form>
+          </search>
+
+          <div className="ml-auto md:ml-0 flex items-center gap-2">
+            {isCreator && (
+              <LinkButton
+                href="/studio/upload"
+                size="sm"
+                icon="upload"
+                className="hidden sm:inline-flex"
               >
-                <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center text-bg font-bold text-sm">
-                  {role[0]?.toUpperCase()}
-                </div>
-                <span className={`hidden sm:inline text-xs px-2 py-0.5 rounded ${badge.tone}`}>
-                  {badge.label}
-                </span>
-                <svg
-                  className="w-3 h-3 text-ink-dim"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth={2}
+                Upload
+              </LinkButton>
+            )}
+            {user ? (
+              <div className="relative hidden md:block" ref={menuRef}>
+                <button
+                  type="button"
+                  aria-expanded={menuOpen}
+                  aria-haspopup="menu"
+                  onClick={() => setMenuOpen((v) => !v)}
+                  className="h-9 w-9 rounded-full bg-surface-2 text-ink inline-flex items-center justify-center"
                 >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {dropdownOpen && (
-                <div className="absolute right-0 mt-2 w-56 bg-bg-elev border border-line rounded-lg shadow-2xl py-1 z-50 fade-up">
-                  <div className="px-4 py-3 border-b border-line">
-                    <div className="text-xs text-ink-dim">Signed in as</div>
-                    <div
-                      className={`text-sm mt-0.5 inline-block px-2 py-0.5 rounded ${badge.tone}`}
+                  <Icon name="user" size={18} label="Account" />
+                </button>
+                {menuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 mt-2 w-48 rounded border border-line bg-surface py-1 text-sm"
+                  >
+                    <Link role="menuitem" href="/me" className="block px-3 py-2 hover:bg-surface-2">
+                      Profile & settings
+                    </Link>
+                    {isCreator && (
+                      <Link
+                        role="menuitem"
+                        href="/studio"
+                        className="block px-3 py-2 hover:bg-surface-2"
+                      >
+                        Studio
+                      </Link>
+                    )}
+                    {user.role === 'admin' && (
+                      <Link
+                        role="menuitem"
+                        href="/admin/applications"
+                        className="block px-3 py-2 hover:bg-surface-2"
+                      >
+                        Creator applications
+                      </Link>
+                    )}
+                    <button
+                      role="menuitem"
+                      type="button"
+                      onClick={() => void signOut()}
+                      className="block w-full text-left px-3 py-2 text-ink-2 hover:bg-surface-2"
                     >
-                      {badge.label}
-                    </div>
+                      Sign out
+                    </button>
                   </div>
-                  <Link
-                    href="/me"
-                    onClick={() => setDropdownOpen(false)}
-                    className="block px-4 py-2 text-sm hover:bg-surface transition"
-                  >
-                    Your account
-                  </Link>
-                  {role === 'viewer' && (
-                    <Link
-                      href="/me/apply"
-                      onClick={() => setDropdownOpen(false)}
-                      className="block px-4 py-2 text-sm text-accent hover:bg-surface transition"
-                    >
-                      Become a creator
-                    </Link>
-                  )}
-                  {canUpload && (
-                    <Link
-                      href="/studio"
-                      onClick={() => setDropdownOpen(false)}
-                      className="block px-4 py-2 text-sm hover:bg-surface transition"
-                    >
-                      Creator studio
-                    </Link>
-                  )}
-                  {role === 'admin' && (
-                    <Link
-                      href="/admin/applications"
-                      onClick={() => setDropdownOpen(false)}
-                      className="block px-4 py-2 text-sm text-warn hover:bg-surface transition"
-                    >
-                      Admin · Applications
-                    </Link>
-                  )}
-                  <div className="border-t border-line my-1" />
-                  <button
-                    onClick={() => {
-                      setDropdownOpen(false);
-                      void handleSignOut();
-                    }}
-                    className="w-full text-left px-4 py-2 text-sm text-ink-mute hover:text-ink hover:bg-surface transition"
-                  >
-                    Sign out
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : (
-            <Link
-              href="/sign-in"
-              className="bg-accent hover:bg-accent-hot text-bg font-semibold rounded-md px-4 py-1.5 text-sm transition"
-            >
-              Sign in
-            </Link>
-          )}
+                )}
+              </div>
+            ) : (
+              <LinkButton
+                href={signInHref(pathname)}
+                size="sm"
+                variant="secondary"
+                className="hidden md:inline-flex"
+              >
+                Sign in
+              </LinkButton>
+            )}
+          </div>
         </div>
-      </div>
-    </nav>
+      </header>
+
+      <nav
+        aria-label="Main"
+        className="md:hidden fixed inset-x-0 bottom-0 z-40 bg-bg border-t border-line"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
+      >
+        <ul className="grid grid-cols-4 h-16">
+          {tabs.map((t) => {
+            const active = t.match(pathname);
+            return (
+              <li key={t.label}>
+                <Link
+                  href={t.href}
+                  aria-current={active ? 'page' : undefined}
+                  className={`h-full flex flex-col items-center justify-center gap-1 text-xs ${
+                    active ? 'text-ink' : 'text-ink-3'
+                  }`}
+                >
+                  <Icon name={t.icon} size={22} className={active ? 'text-accent' : undefined} />
+                  {t.label}
+                </Link>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+    </>
   );
 }
