@@ -10,3 +10,5 @@ export * from './fx-rates';
 export * from './payouts';
 export * from './premium-pool';
 export * from './captions';
+export * from './national-ids';
+export * from './collections';

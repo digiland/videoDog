@@ -1,38 +1,58 @@
 'use client';
-import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
+import { Icon } from '../../src/ui/icon';
 
-interface SearchFormProps {
-  initialQuery: string;
-}
-
-export default function SearchForm({ initialQuery }: SearchFormProps) {
+/**
+ * The search box. It is the page's only job, so an empty search page focuses it (the
+ * phone keyboard opens); with results showing it stays unfocused so they can be read.
+ */
+export default function SearchForm({ initialQuery, mode }: { initialQuery: string; mode: string }) {
   const router = useRouter();
   const [query, setQuery] = useState(initialQuery);
+  const inputRef = useRef<HTMLInputElement>(null);
 
-  function handleSubmit(e: React.FormEvent) {
+  useEffect(() => {
+    if (!initialQuery) inputRef.current?.focus();
+  }, [initialQuery]);
+
+  function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (query.trim()) {
-      router.push(`/search?q=${encodeURIComponent(query.trim())}`);
-    }
+    const q = query.trim();
+    if (!q) return;
+    const params = new URLSearchParams({ q });
+    if (mode !== 'all') params.set('mode', mode);
+    inputRef.current?.blur();
+    router.push(`/search?${params.toString()}`);
   }
 
   return (
-    <form onSubmit={handleSubmit} className="flex gap-3 max-w-xl">
-      <input
-        type="search"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search videos..."
-        className="bg-[#16213e] border border-gray-700 text-white rounded-lg px-4 py-2.5 flex-1 focus:outline-none focus:border-[#e94560] transition placeholder:text-gray-500"
-        autoFocus
-      />
-      <button
-        type="submit"
-        className="bg-[#e94560] hover:bg-[#c73652] text-white font-semibold py-2.5 px-5 rounded-lg transition"
-      >
-        Search
-      </button>
-    </form>
+    <search>
+      <form onSubmit={submit} className="flex gap-2">
+        <label htmlFor="search-q" className="sr-only">
+          Search videos and creators
+        </label>
+        <div className="flex h-11 min-w-0 flex-1 items-center gap-2 rounded border border-line bg-surface px-3 focus-within:border-accent">
+          <Icon name="search" size={18} className="shrink-0 text-ink-3" />
+          <input
+            ref={inputRef}
+            id="search-q"
+            type="search"
+            enterKeyHint="search"
+            autoComplete="off"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search videos and creators"
+            className="min-w-0 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-ink-3 focus-visible:outline-none"
+          />
+        </div>
+        <button
+          type="submit"
+          className="inline-flex h-11 shrink-0 items-center justify-center rounded bg-accent px-4 text-sm font-semibold text-on-accent transition-colors hover:bg-accent-strong"
+        >
+          Search
+        </button>
+      </form>
+    </search>
   );
 }

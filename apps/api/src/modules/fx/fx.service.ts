@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, gt, isNull, lte, or } from 'drizzle-orm';
 import Redis from 'ioredis';
 import { DB, type Db } from '../../db/db.module';
@@ -21,39 +21,24 @@ export class FxService {
     @Inject(REDIS) private readonly redis: Redis,
   ) {}
 
-  /** Get the best FX rate for base→quote at time `at`. Caches 5 min. */
+  /**
+   * Best FX rate for base→quote at time `at` (§5 resolution order). Caches 5 min.
+   *
+   * Feeds store rates as USD→X, so a X→USD lookup falls back to the stored USD→X row;
+   * `Money.convert` divides when given the reverse pair. The returned rate keeps its stored
+   * base/quote so `fx_rate_id` snapshots point at the real row (§3.4).
+   */
   async rate(base: CurrencyCode, quote: CurrencyCode, at?: Date): Promise<FxRate> {
     if (base === quote) {
-      return {
-        id: 'identity',
-        base,
-        quote,
-        rate: '1.0000000000',
-        source: 'identity',
-      };
+      return { id: 'identity', base, quote, rate: '1.0000000000', source: 'identity' };
     }
 
     const now = at ?? new Date();
-    const cacheKey = `fx:rate:${base}:${quote}:${now.toISOString().slice(0, 10)}`;
-    const cached = await this.redis.get(cacheKey);
-    if (cached) {
-      return JSON.parse(cached) as FxRate;
-    }
+    const cacheKey = `fx:rate:${base}:${quote}:${now.toISOString().slice(0, 13)}`;
+    const cached = at ? null : await this.redis.get(cacheKey);
+    if (cached) return JSON.parse(cached) as FxRate;
 
-    const [row] = await this.db
-      .select()
-      .from(fxRates)
-      .where(
-        and(
-          eq(fxRates.base, base),
-          eq(fxRates.quote, quote),
-          lte(fxRates.effectiveFrom, now),
-          or(isNull(fxRates.effectiveUntil), gt(fxRates.effectiveUntil, now)),
-        ),
-      )
-      .orderBy(desc(fxRates.sourcePriority), desc(fxRates.fetchedAt))
-      .limit(1);
-
+    const row = (await this.findRow(base, quote, now)) ?? (await this.findRow(quote, base, now));
     if (!row) throw new ResourceNotFoundError(`FX rate ${base}→${quote}`);
 
     const result: FxRate = {
@@ -63,25 +48,58 @@ export class FxService {
       rate: row.rate,
       source: row.source as FxRate['source'],
     };
-
-    await this.redis.setex(cacheKey, 300, JSON.stringify(result));
+    if (!at) await this.redis.setex(cacheKey, 300, JSON.stringify(result));
     return result;
   }
 
-  async convertToUsd(money: Money, at?: Date): Promise<ConvertResult> {
-    if (money.currency === 'USD') {
-      const identityRate: FxRate = {
-        id: 'identity',
-        base: 'USD',
-        quote: 'USD',
-        rate: '1.0000000000',
-        source: 'identity',
-      };
-      return { usd: money, fxRate: identityRate };
+  private async findRow(base: string, quote: string, at: Date) {
+    const [row] = await this.db
+      .select()
+      .from(fxRates)
+      .where(
+        and(
+          eq(fxRates.base, base),
+          eq(fxRates.quote, quote),
+          lte(fxRates.effectiveFrom, at),
+          or(isNull(fxRates.effectiveUntil), gt(fxRates.effectiveUntil, at)),
+        ),
+      )
+      .orderBy(desc(fxRates.sourcePriority), desc(fxRates.fetchedAt))
+      .limit(1);
+    return row ?? null;
+  }
+
+  /**
+   * Convert into any currency. Pairs with no direct rate (e.g. ZAR→ZWG) go through USD;
+   * `fxRate` is then the leg into the target currency.
+   */
+  async convert(
+    money: Money,
+    target: CurrencyCode,
+    at?: Date,
+  ): Promise<{ converted: Money; fxRate: FxRate }> {
+    if (money.currency === target) {
+      return { converted: money, fxRate: await this.rate(target, target) };
     }
-    const fxRate = await this.rate(money.currency, 'USD', at);
-    const usd = money.toUsdEquivalent(fxRate);
-    return { usd, fxRate };
+    try {
+      const fxRate = await this.rate(money.currency, target, at);
+      return { converted: money.convert(fxRate, target), fxRate };
+    } catch (err) {
+      if (!(err instanceof ResourceNotFoundError) || money.currency === 'USD' || target === 'USD') {
+        throw err;
+      }
+    }
+    const toUsd = await this.rate(money.currency, 'USD', at);
+    const fromUsd = await this.rate('USD', target, at);
+    return {
+      converted: money.convert(toUsd, 'USD').convert(fromUsd, target),
+      fxRate: fromUsd,
+    };
+  }
+
+  async convertToUsd(money: Money, at?: Date): Promise<ConvertResult> {
+    const { converted, fxRate } = await this.convert(money, 'USD', at);
+    return { usd: converted, fxRate };
   }
 
   async closeCurrentRates(base: string, quote: string, source: string): Promise<void> {

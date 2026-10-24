@@ -442,6 +442,44 @@ CREATE TABLE watch_minutes_daily (
   PRIMARY KEY (date, video_id)
 );
 CREATE INDEX watch_minutes_daily_video_idx ON watch_minutes_daily (video_id, date);
+
+-- COLLECTIONS (courses + playlists; full DDL in infra/migrations/0015_collections.sql)
+-- Grouping only: no price of its own; access stays per video via checkAccess (§3.9).
+CREATE TYPE collection_kind AS ENUM ('course','playlist');
+CREATE TYPE collection_state AS ENUM ('draft','published','unpublished');
+
+CREATE TABLE collections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id uuid NOT NULL REFERENCES users(id),
+  kind collection_kind NOT NULL,
+  title text NOT NULL,
+  description text,
+  thumbnail_key text,
+  state collection_state NOT NULL DEFAULT 'draft',
+  search_doc tsvector GENERATED ALWAYS AS (...) STORED,  -- same weighting as videos
+  published_at timestamptz,
+  ...
+);
+
+-- Courses only (a playlist can never have sections).
+CREATE TABLE collection_sections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id uuid NOT NULL,                        -- FK (collection_id,'course') → collections(id,kind)
+  title text NOT NULL,
+  position int NOT NULL,                              -- UNIQUE per collection, DEFERRABLE
+  ...
+);
+
+CREATE TABLE collection_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id uuid NOT NULL,
+  owner_id uuid NOT NULL,                             -- FKs (collection_id,owner_id) + (video_id,owner_id): own videos only
+  video_id uuid NOT NULL,
+  section_id uuid,                                    -- FK (section_id,collection_id); NULL = unsectioned
+  position int NOT NULL,                              -- UNIQUE NULLS NOT DISTINCT (collection_id,section_id,position), DEFERRABLE
+  ...,
+  UNIQUE (collection_id, video_id)
+);
 ```
 
 ---
@@ -450,18 +488,20 @@ CREATE INDEX watch_minutes_daily_video_idx ON watch_minutes_daily (video_id, dat
 
 Layout per module: `<name>.{module,controller,service,repository,spec}.ts` + `dto/` (Zod schemas re-exported from `@streamzw/shared`). Drizzle queries in services; raw SQL allowed only in `*.repository.ts`.
 
-| Module          | Endpoints                                                                                                                                                                                                                   |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth`          | `POST /auth/otp/{request,verify}`, `POST /auth/refresh`, `POST /auth/logout`. Guards: `JwtGuard`, `RolesGuard('creator'\|'admin')`.                                                                                         |
-| `users`         | `GET/PATCH /users/me`, `POST /users/me/become-creator` (requires `phone_verified`, locks `canonical_pricing_currency`), `POST /users/me/kyc/id`.                                                                            |
-| `videos`        | `POST /videos` (presigned multipart upload), `POST /videos/:id/complete-upload`, `PATCH /videos/:id`, `POST /videos/:id/publish`, `GET /videos[/:id]`, `GET /videos/:id/playlist` (signed HLS URL if `checkAccess` allows). |
-| `subscriptions` | `GET /subscriptions/plans` (priced in display currency), `POST /subscriptions`, `GET /subscriptions/me`, `POST /subscriptions/me/cancel`.                                                                                   |
-| `payments`      | `POST /payments`, `POST /webhooks/{ecocash,zipit,paystack}` (idempotent).                                                                                                                                                   |
-| `wallet`        | `GET /wallet/balance`, `GET /wallet/ledger`, `POST /wallet/payout`.                                                                                                                                                         |
-| `watch`         | `POST /watch/sessions`, `POST /watch/sessions/:id/{heartbeat,end}`.                                                                                                                                                         |
-| `search`        | `GET /search?q=&mode=` (Postgres FTS).                                                                                                                                                                                      |
-| `fx`            | `GET /fx/rates`, cron `fx.refresh` (06:00 CAT daily), `POST /admin/fx/override`.                                                                                                                                            |
-| `notifications` | Internal — WhatsApp → SMS → push. Events: payment_completed, subscription_renewing, payout_processed, new_video_from_followed.                                                                                              |
+| Module          | Endpoints                                                                                                                                                                                                                                                                                           |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth`          | `POST /auth/otp/{request,verify}`, `POST /auth/refresh`, `POST /auth/logout`. Guards: `JwtGuard`, `RolesGuard('creator'\|'admin')`.                                                                                                                                                                 |
+| `users`         | `GET/PATCH /users/me`, `POST /users/me/become-creator` (requires `phone_verified`, locks `canonical_pricing_currency`), `POST /users/me/kyc/id`.                                                                                                                                                    |
+| `videos`        | `POST /videos` (presigned multipart upload), `POST /videos/:id/complete-upload`, `PATCH /videos/:id`, `POST /videos/:id/publish`, `GET /videos[/:id]`, `GET /videos/:id/playlist` (signed HLS URL if `checkAccess` allows).                                                                         |
+| `subscriptions` | `GET /subscriptions/plans` (priced in display currency), `POST /subscriptions`, `GET /subscriptions/me`, `POST /subscriptions/me/cancel`.                                                                                                                                                           |
+| `payments`      | `POST /payments`, `POST /webhooks/{ecocash,zipit,paystack}` (idempotent).                                                                                                                                                                                                                           |
+| `wallet`        | `GET /wallet/balance`, `GET /wallet/ledger`, `POST /wallet/payout`.                                                                                                                                                                                                                                 |
+| `watch`         | `POST /watch/sessions`, `POST /watch/sessions/:id/{heartbeat,end}`, `GET /watch/history`. A view = a session past 2 counted heartbeats (~30s), creator's own excluded.                                                                                                                              |
+| `collections`   | Courses (with sections) and playlists of a creator's own videos. `GET /collections[?creator=&category=&kind=&video=&q=]`, `GET /collections/:id`, creator CRUD + `/sections`, `/items`, `PUT /collections/:id/layout`, `/publish`. Grouping only: no price; each video keeps its own `checkAccess`. |
+| `channels`      | `GET /channels/:handleOrId`, `GET /channels?q=` (public creator profiles; part of `users`).                                                                                                                                                                                                         |
+| `search`        | `GET /search?q=&mode=&category=` (Postgres FTS).                                                                                                                                                                                                                                                    |
+| `fx`            | `GET /fx/rates`, cron `fx.refresh` (06:00 CAT daily), `POST /admin/fx/override`.                                                                                                                                                                                                                    |
+| `notifications` | Internal — WhatsApp → SMS → push. Events: payment_completed, subscription_renewing, payout_processed, new_video_from_followed.                                                                                                                                                                      |
 
 ---
 

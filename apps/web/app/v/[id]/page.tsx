@@ -1,144 +1,204 @@
-import { notFound } from 'next/navigation';
-import type { Video, AccessResult, PlaylistResponse } from '../../../src/types/api';
-import { formatDuration } from '../../../src/lib/format';
-import VideoPlayerSection from './VideoPlayerSection';
-import Paywall from '../../components/Paywall';
+import type { Metadata } from 'next';
+import Link from 'next/link';
+import { cache } from 'react';
+import type {
+  Channel,
+  CollectionDetail,
+  CollectionEntry,
+  CollectionSummary,
+  Video,
+} from '../../../src/types/api';
+import { Icon } from '../../../src/ui/icon';
+import { VideoRow, videoHref } from '../../components/VideoCard';
+import { API_BASE } from '../../components/viewer/catalog';
+import { collectionMeta } from '../../components/viewer/CollectionCard';
+import VideoAccessSection from './VideoAccessSection';
+import VideoMeta from './VideoMeta';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
-
-async function getVideo(id: string): Promise<Video | null> {
+async function getJson<T>(path: string, init: RequestInit = { cache: 'no-store' }) {
   try {
-    const res = await fetch(`${API_BASE}/videos/${id}`, {
-      cache: 'no-store',
-    });
-    if (res.status === 404) return null;
-    if (!res.ok) return null;
-    return res.json() as Promise<Video>;
+    const res = await fetch(`${API_BASE}${path}`, init);
+    return res.ok ? ((await res.json()) as T) : null;
   } catch {
     return null;
   }
 }
 
-interface PlaylistWithCaptions extends PlaylistResponse {
-  url: string;
-  captions?: Array<{
-    id: string;
-    language: string;
-    label: string;
-    kind: 'subtitles' | 'captions';
-    is_default: boolean;
-    url: string;
-  }>;
-}
+/**
+ * Anonymous, metadata-only fetch for server rendering (title, description, thumbnail).
+ * Access is NOT decided here: the server has no viewer token, so the access check and
+ * playlist fetch happen client-side in <VideoAccessSection> with the viewer's auth.
+ * Returns null on 404 too — an owner's unpublished video 404s anonymously, and the
+ * client section re-fetches it with the owner's token. Wrapped in `cache` so the page and
+ * generateMetadata share one request.
+ */
+const getPublicVideo = cache((id: string) => getJson<Video>(`/videos/${encodeURIComponent(id)}`));
 
-async function getPlaylist(id: string): Promise<PlaylistWithCaptions | null> {
-  try {
-    const res = await fetch(`${API_BASE}/videos/${id}/playlist`, {
-      cache: 'no-store',
-    });
-    if (!res.ok) return null;
-    return (await res.json()) as PlaylistWithCaptions;
-  } catch {
-    return null;
-  }
-}
-
-function formatDate(dateStr: string): string {
-  return new Date(dateStr).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
-}
-
-export default async function VideoPage({ params }: { params: Promise<{ id: string }> }) {
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
   const { id } = await params;
-  const video = await getVideo(id);
+  const video = await getPublicVideo(id);
+  if (!video) return { title: 'Video · StreamZW' };
+  return {
+    title: `${video.title} · StreamZW`,
+    description: video.description ?? undefined,
+    openGraph: video.thumbnail_url ? { images: [video.thumbnail_url] } : undefined,
+  };
+}
 
-  if (!video) return notFound();
+/** A course's videos in play order: unsectioned first, then each section in turn. */
+function playOrder(c: CollectionDetail): (CollectionEntry & { section: string | null })[] {
+  return [
+    ...c.unsectioned.map((e) => ({ ...e, section: null })),
+    ...c.sections.flatMap((s) => s.items.map((e) => ({ ...e, section: s.title }))),
+  ];
+}
 
-  const access = video.access_check_result as AccessResult | undefined;
-  const canPlay = access?.ok === true;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-  const playlist = canPlay ? await getPlaylist(id) : null;
-  const playlistUrl = playlist?.url ?? null;
+/**
+ * Watch page, YouTube's layout: player and details on the left; on the right (below on
+ * phones) the course or playlist being played, then more videos. Player first, edge to
+ * edge on phones; the paywall takes the player's place in the same box.
+ */
+export default async function VideoPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ list?: string }>;
+}) {
+  const { id } = await params;
+  const { list } = await searchParams;
+  const listId = list && UUID.test(list) ? list : null;
+  const video = await getPublicVideo(id);
 
-  const creatorName = video.creator?.display_name ?? video.creator?.handle ?? 'Creator';
+  const creatorId = video?.creator?.id ?? video?.owner_id;
+  const [collection, partOf, fromCreator, related, channel] = await Promise.all([
+    listId ? getJson<CollectionDetail>(`/collections/${listId}`) : null,
+    !listId && video ? getJson<{ items: CollectionSummary[] }>(`/collections?video=${id}`) : null,
+    creatorId
+      ? getJson<{ items: Video[] }>(`/videos?creator=${creatorId}&exclude=${id}&limit=8`, {
+          next: { revalidate: 60 },
+        })
+      : null,
+    video
+      ? getJson<{ items: Video[] }>(`/videos?category=${video.category}&exclude=${id}&limit=12`, {
+          next: { revalidate: 60 },
+        })
+      : null,
+    creatorId ? getJson<Channel>(`/channels/${creatorId}`, { next: { revalidate: 300 } }) : null,
+  ]);
+
+  const partOfItems = partOf?.items ?? [];
+  const order = collection ? playOrder(collection) : [];
+  const at = order.findIndex((e) => e.video.id === id);
+  const nextEntry = at >= 0 ? order[at + 1] : undefined;
+  const next = nextEntry
+    ? {
+        href: videoHref(nextEntry.video, listId),
+        title: nextEntry.video.title,
+        label: collection?.kind === 'course' ? 'Next lesson' : 'Up next',
+      }
+    : null;
+
+  // More videos: the creator's first, then the same topic, without repeats.
+  const seen = new Set<string>([id, ...order.map((e) => e.video.id)]);
+  const more = [...(fromCreator?.items ?? []), ...(related?.items ?? [])].filter((v) => {
+    if (seen.has(v.id)) return false;
+    seen.add(v.id);
+    return true;
+  });
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
-      {/* Player or Paywall */}
-      <div className="mb-6">
-        {canPlay && playlistUrl ? (
-          <VideoPlayerSection
-            src={playlistUrl}
-            videoId={video.id}
-            captions={playlist?.captions ?? []}
-          />
-        ) : access?.ok === false ? (
-          <div className="aspect-video bg-[#16213e] rounded-xl overflow-hidden relative">
-            {/* Blurred thumbnail background */}
-            {video.thumbnail_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={video.thumbnail_url}
-                alt=""
-                className="w-full h-full object-cover blur-sm opacity-30"
-              />
-            )}
-            <div className="absolute inset-0 flex items-center justify-center p-4">
-              <div className="w-full max-w-lg">
-                <Paywall payload={access.paywall} videoId={video.id} />
-              </div>
-            </div>
-          </div>
-        ) : (
-          // No access info — free video not playable or error
-          <div className="aspect-video bg-[#16213e] rounded-xl flex items-center justify-center">
-            <p className="text-gray-500">Video unavailable</p>
+    <div className="mx-auto flex max-w-[1760px] flex-col gap-6 lg:flex-row lg:px-6 lg:pt-6">
+      <div className="min-w-0 flex-1">
+        <VideoAccessSection
+          videoId={id}
+          next={next}
+          initialThumbnailUrl={video?.thumbnail_url ?? null}
+          hasServerMetadata={video !== null}
+        />
+        {video && <VideoMeta video={video} channel={channel} />}
+        {partOfItems.length > 0 && (
+          <div className="flex flex-col gap-2 px-4 pt-4 lg:px-0">
+            {partOfItems.map((c) => (
+              <Link
+                key={c.id}
+                href={`/v/${id}?list=${c.id}`}
+                className="flex items-center gap-3 rounded-xl border border-line p-3 transition-colors hover:bg-surface"
+              >
+                <Icon
+                  name={c.kind === 'course' ? 'course' : 'playlist'}
+                  size={22}
+                  className="shrink-0 text-accent"
+                />
+                <span className="flex min-w-0 flex-col">
+                  <span className="text-xs text-ink-3">
+                    Part of this {c.kind === 'course' ? 'course' : 'playlist'}
+                  </span>
+                  <span className="truncate text-sm font-semibold text-ink">{c.title}</span>
+                  <span className="text-xs text-ink-3 num">{collectionMeta(c)}</span>
+                </span>
+                <Icon name="chevronRight" size={18} className="ml-auto shrink-0 text-ink-3" />
+              </Link>
+            ))}
           </div>
         )}
       </div>
 
-      {/* Metadata */}
-      <div>
-        <h1 className="text-2xl font-bold text-white">{video.title}</h1>
-        <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-gray-400">
-          <span>{creatorName}</span>
-          {video.duration_seconds != null && (
-            <>
-              <span>·</span>
-              <span>{formatDuration(video.duration_seconds)}</span>
-            </>
-          )}
-          {video.published_at && (
-            <>
-              <span>·</span>
-              <span>{formatDate(video.published_at)}</span>
-            </>
-          )}
-          <span>·</span>
-          <span
-            className={`capitalize px-2 py-0.5 rounded-full text-xs font-semibold border ${
-              video.access_mode === 'free'
-                ? 'bg-green-900/60 text-green-300 border-green-700/50'
-                : video.access_mode === 'ppv'
-                  ? 'bg-yellow-900/60 text-yellow-300 border-yellow-700/50'
-                  : video.access_mode === 'premium_buyable'
-                    ? 'bg-blue-900/60 text-blue-300 border-blue-700/50'
-                    : 'bg-purple-900/60 text-purple-300 border-purple-700/50'
-            }`}
+      <aside
+        aria-label="Up next"
+        className="flex w-full shrink-0 flex-col gap-4 px-4 lg:w-[402px] lg:px-0"
+      >
+        {collection && (
+          <section
+            aria-label={collection.title}
+            className="flex max-h-[520px] flex-col overflow-hidden rounded-xl border border-line"
           >
-            {video.access_mode.replace(/_/g, ' ')}
-          </span>
-        </div>
-
-        {video.description && (
-          <p className="mt-4 text-gray-300 text-sm leading-relaxed whitespace-pre-wrap">
-            {video.description}
-          </p>
+            <header className="flex flex-col gap-0.5 border-b border-line bg-surface px-4 py-3">
+              <Link
+                href={`/collections/${collection.id}`}
+                className="line-clamp-1 font-bold text-ink hover:text-accent"
+              >
+                {collection.title}
+              </Link>
+              <p className="text-xs text-ink-3 num">
+                {collection.creator?.display_name} · {at >= 0 ? at + 1 : '–'}/{order.length}
+              </p>
+            </header>
+            <ol className="flex flex-col overflow-y-auto py-1">
+              {order.map((e, i) => (
+                <li key={e.id}>
+                  {e.section && order[i - 1]?.section !== e.section && (
+                    <p className="px-3 pb-1 pt-3 text-xs font-semibold uppercase tracking-wide text-ink-3">
+                      {e.section}
+                    </p>
+                  )}
+                  <VideoRow
+                    video={e.video}
+                    listId={collection.id}
+                    index={i + 1}
+                    active={i === at}
+                  />
+                </li>
+              ))}
+            </ol>
+          </section>
         )}
-      </div>
+        {more.length > 0 && (
+          <ul className="flex flex-col gap-2">
+            {more.map((v) => (
+              <li key={v.id}>
+                <VideoRow video={v} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </aside>
     </div>
   );
 }

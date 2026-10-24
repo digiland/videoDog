@@ -5,23 +5,45 @@ import { FxService } from '../modules/fx/fx.service';
 import { RbzScraper } from '../modules/fx/rbz.scraper';
 import { OxrClient } from '../modules/fx/oxr.client';
 import { SubscriptionsService } from '../modules/subscriptions/subscriptions.service';
+import { PaymentsService } from '../modules/payments/payments.service';
+import { WalletService } from '../modules/wallet/wallet.service';
+import { bullmqConnection } from '../common/bullmq-connection';
 
 @Injectable()
 export class SchedulerService {
   private readonly logger = new Logger(SchedulerService.name);
   private readonly premiumPoolQueue: Queue;
+  private readonly watchAggregateQueue: Queue;
 
   constructor(
     private readonly fxService: FxService,
     private readonly rbzScraper: RbzScraper,
     private readonly oxrClient: OxrClient,
     private readonly subscriptionsService: SubscriptionsService,
+    private readonly paymentsService: PaymentsService,
+    private readonly walletService: WalletService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.premiumPoolQueue = new Queue('payouts.calculate_premium_pool', {
-      connection: { url: redisUrl } as any,
+      connection: bullmqConnection(redisUrl),
     });
+    this.watchAggregateQueue = new Queue('watch.aggregate', {
+      connection: bullmqConnection(redisUrl),
+    });
+  }
+
+  /**
+   * Daily watch-minute rollup (00:30 UTC) of yesterday's sessions into watch_minutes_daily.
+   * The premium pool distributes by these rows, so without this job it pays nobody.
+   */
+  @Cron('30 0 * * *')
+  async enqueueWatchAggregation() {
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      await this.watchAggregateQueue.add('aggregate', {}, { jobId: `watch-aggregate:${day}` });
+    } catch (err) {
+      this.logger.error('Failed to enqueue watch aggregation job', err);
+    }
   }
 
   /**
@@ -111,6 +133,28 @@ export class SchedulerService {
       } catch (err) {
         this.logger.error('Failed to enqueue premium pool calculations job', err);
       }
+    }
+  }
+
+  /** §3.12: settle payments whose webhook never arrived, by asking the provider. */
+  @Cron('*/5 * * * *')
+  async reconcilePayments() {
+    try {
+      const n = await this.paymentsService.reconcilePending();
+      if (n > 0) this.logger.log(`Reconciled ${n} stale payments`);
+    } catch (err) {
+      this.logger.error('Payment reconciliation failed', err);
+    }
+  }
+
+  /** Send requested creator payouts. */
+  @Cron('*/10 * * * *')
+  async processPayouts() {
+    try {
+      const n = await this.walletService.processPayouts();
+      if (n > 0) this.logger.log(`Processed ${n} payouts`);
+    } catch (err) {
+      this.logger.error('Payout processing failed', err);
     }
   }
 }

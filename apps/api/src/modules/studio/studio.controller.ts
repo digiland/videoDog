@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Req, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, ParseUUIDPipe, Query, Req, UseGuards } from '@nestjs/common';
 import { JwtGuard } from '../auth/jwt.guard';
 import { RequireAuthGuard } from '../auth/require-auth.guard';
 import { Roles } from '../auth/roles.guard';
@@ -24,12 +24,14 @@ export class StudioController {
 
   @Get('videos/:id/analytics')
   async getAnalytics(
-    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+    @Param('id', ParseUUIDPipe) id: string,
     @Query('from') from?: string,
     @Query('to') to?: string,
   ) {
     const fromDate = from ? new Date(from) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const toDate = to ? new Date(to) : new Date();
+    await this.analytics.assertCanView(id, req.user);
 
     const [minutes, conversion] = await Promise.all([
       this.analytics.watchMinutes(id, fromDate, toDate),

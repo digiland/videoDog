@@ -2,7 +2,7 @@
 
 Creator-led video platform for Zimbabwe. Each video is one of four access modes — `free`, `ppv`, `premium`, `premium_buyable` — priced in the creator's canonical currency (USD by default), with viewer-side display conversion for ZWG, ZAR and (phase 2) EUR / GBP. Subscriptions are $0.99 day-pass or $1.49 month; PPV unlocks $0.10–$2.00.
 
-Full spec: [CLAUDE.md](./CLAUDE.md). Work breakdown: [tickets/](./tickets/). Implementation review: [docs/REVIEW.md](./docs/REVIEW.md). End-to-end usage guide: [WALKTHROUGH.md](./WALKTHROUGH.md).
+Full spec: [CLAUDE.md](./CLAUDE.md). Deploying: [docs/DEPLOY.md](./docs/DEPLOY.md). End-to-end tests: [e2e/README.md](./e2e/README.md). Work breakdown: [tickets/](./tickets/). Implementation review: [docs/REVIEW.md](./docs/REVIEW.md). End-to-end usage guide: [WALKTHROUGH.md](./WALKTHROUGH.md).
 
 ## Stack
 

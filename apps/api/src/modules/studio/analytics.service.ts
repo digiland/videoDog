@@ -1,11 +1,24 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, gte, lte, sql } from 'drizzle-orm';
+import { and, count, countDistinct, eq, gte, lte, sum } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
-import { watchMinutesDaily, watchSessions, purchases } from '../../db/schema';
+import { watchMinutesDaily, watchSessions, purchases, videos } from '../../db/schema';
+import { ResourceNotFoundError } from '../auth/errors';
 
 @Injectable()
 export class AnalyticsService {
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /** Analytics are the owner's (or an admin's) only; anyone else gets a plain 404. */
+  async assertCanView(videoId: string, user: { id: string; role: string }) {
+    const [v] = await this.db
+      .select({ ownerId: videos.ownerId })
+      .from(videos)
+      .where(eq(videos.id, videoId))
+      .limit(1);
+    if (!v || (v.ownerId !== user.id && user.role !== 'admin')) {
+      throw new ResourceNotFoundError('Video');
+    }
+  }
 
   async watchMinutes(videoId: string, from: Date, to: Date): Promise<bigint> {
     // Try daily aggregates first
@@ -13,7 +26,7 @@ export class AnalyticsService {
     const toDate = to.toISOString().slice(0, 10);
 
     const [row] = await this.db
-      .select({ total: sql<string>`COALESCE(SUM(minutes::bigint), 0)` })
+      .select({ total: sum(watchMinutesDaily.minutes) })
       .from(watchMinutesDaily)
       .where(
         and(
@@ -23,11 +36,11 @@ export class AnalyticsService {
         ),
       );
 
-    if (row && row.total !== '0') return BigInt(row.total);
+    if (row?.total && row.total !== '0') return BigInt(row.total);
 
     // Fallback: sum from watch_sessions
     const [fallback] = await this.db
-      .select({ total: sql<string>`COALESCE(SUM(minutes_watched), 0)` })
+      .select({ total: sum(watchSessions.minutesWatched) })
       .from(watchSessions)
       .where(
         and(
@@ -42,7 +55,7 @@ export class AnalyticsService {
 
   async conversionRate(videoId: string, from: Date, to: Date) {
     const [watchersRow] = await this.db
-      .select({ count: sql<string>`COUNT(DISTINCT user_id)` })
+      .select({ count: countDistinct(watchSessions.userId) })
       .from(watchSessions)
       .where(
         and(
@@ -53,7 +66,7 @@ export class AnalyticsService {
       );
 
     const [purchasesRow] = await this.db
-      .select({ count: sql<string>`COUNT(*)` })
+      .select({ count: count() })
       .from(purchases)
       .where(
         and(
@@ -64,8 +77,8 @@ export class AnalyticsService {
         ),
       );
 
-    const watchers = parseInt(watchersRow?.count ?? '0', 10);
-    const bought = parseInt(purchasesRow?.count ?? '0', 10);
+    const watchers = watchersRow?.count ?? 0;
+    const bought = purchasesRow?.count ?? 0;
 
     return {
       unique_watchers: watchers,

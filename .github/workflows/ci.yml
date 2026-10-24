@@ -54,6 +54,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The transcoder tests run real ffmpeg (they skip if it's missing).
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
       - run: pnpm --filter api migrate
 
       - run: pnpm lint
@@ -63,3 +66,28 @@ jobs:
       - run: pnpm build
 
       - run: pnpm test
+
+  # The production images build (Dockerfiles, ffmpeg in the API image). No push.
+  images:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          build-args: NEXT_PUBLIC_API_BASE=https://api.example.com
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web

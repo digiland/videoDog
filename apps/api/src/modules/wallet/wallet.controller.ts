@@ -29,6 +29,11 @@ export class WalletController {
     );
   }
 
+  @Get('payouts')
+  async payouts(@Req() req: AuthenticatedRequest) {
+    return this.wallet.listPayouts(req.user.id);
+  }
+
   @Post('payout')
   async payout(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
     return this.wallet.requestPayout(req.user.id, body);

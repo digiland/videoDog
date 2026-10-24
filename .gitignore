@@ -27,3 +27,12 @@ pnpm-debug.log*
 # husky internals (none in v9)
 .husky/_/
 .claude/
+dump.rdb
+
+# Production secrets (the .example stays tracked)
+.env.production
+infra/.env.production
+
+# Playwright
+test-results/
+playwright-report/

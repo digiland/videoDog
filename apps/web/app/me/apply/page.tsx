@@ -1,21 +1,35 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api } from '../../../src/lib/api';
-import { isAuthenticated } from '../../../src/lib/auth';
+import { getRefreshToken, isAuthenticated } from '../../../src/lib/auth';
+import { Button, LinkButton } from '../../../src/ui/button';
+import { Icon } from '../../../src/ui/icon';
+import { Notice } from '../../../src/ui/notice';
+import { Segmented } from '../../../src/ui/segmented';
+import { PayStatus } from '../../components/account/PayStatus';
+import { errorText } from '../../components/account/errors';
 
-const CURRENCIES = ['USD', 'ZWG', 'ZAR'];
+type Currency = 'USD' | 'ZWG' | 'ZAR';
+const CURRENCIES: { value: Currency; label: string }[] = [
+  { value: 'USD', label: 'USD' },
+  { value: 'ZWG', label: 'ZWG' },
+  { value: 'ZAR', label: 'ZAR' },
+];
+const MIN = 20;
+const MAX = 800;
 
 export default function ApplyCreatorPage() {
   const router = useRouter();
   const [pitch, setPitch] = useState('');
-  const [currency, setCurrency] = useState('USD');
+  const [currency, setCurrency] = useState<Currency>('USD');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
 
   useEffect(() => {
-    if (!isAuthenticated()) router.push('/sign-in');
+    if (!isAuthenticated() && !getRefreshToken()) router.push('/sign-in?return_to=%2Fme%2Fapply');
   }, [router]);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -28,99 +42,92 @@ export default function ApplyCreatorPage() {
         canonical_currency: currency,
       });
       setDone(true);
-      setTimeout(() => router.push('/me'), 1200);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to submit application.');
+      setError(errorText(err, 'Your application was not sent. Try again.'));
     } finally {
       setSubmitting(false);
     }
   }
 
+  const length = pitch.trim().length;
+  const tooShort = length < MIN;
+
   if (done) {
     return (
-      <div className="max-w-md mx-auto px-6 py-24 text-center fade-up">
-        <div className="w-12 h-12 mx-auto rounded-full bg-ok/20 flex items-center justify-center mb-4">
-          <svg
-            className="w-6 h-6 text-ok"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={3}
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-        <h1 className="text-2xl font-bold">Application submitted</h1>
-        <p className="text-ink-mute text-sm mt-2">Redirecting…</p>
+      <div className="max-w-md mx-auto px-4 pt-10 pb-10">
+        <PayStatus
+          tone="success"
+          title="Application sent"
+          actions={
+            <LinkButton href="/me" size="lg" block>
+              Back to account
+            </LinkButton>
+          }
+        >
+          <p>
+            An admin reviews every application, usually within 48 hours. We&rsquo;ll message you.
+          </p>
+        </PayStatus>
       </div>
     );
   }
 
   return (
-    <div className="max-w-xl mx-auto px-6 py-10 fade-up">
-      <h1 className="text-3xl font-bold">Become a creator</h1>
-      <p className="text-ink-mute mt-2">
-        Tell us what you&rsquo;d publish. Admins approve manually.
-      </p>
-
-      <form
-        onSubmit={(e) => void handleSubmit(e)}
-        className="mt-8 space-y-5 bg-bg-elev border border-line rounded-lg p-6"
+    <div className="max-w-md mx-auto px-4 pt-4 pb-10 flex flex-col gap-6">
+      <Link
+        href="/me"
+        className="inline-flex items-center gap-1 -ml-1 h-11 self-start text-sm font-semibold text-ink-2 hover:text-ink"
       >
-        <div>
-          <label className="block text-sm font-medium mb-1.5">What will you make?</label>
+        <Icon name="chevronLeft" size={18} />
+        Account
+      </Link>
+      <header className="flex flex-col gap-2">
+        <h1 className="text-2xl font-bold text-ink">Become a creator</h1>
+        <p className="text-base text-ink-2">
+          Tell us what you&rsquo;d publish. An admin reads every application. Once approved you can
+          upload, set prices and get paid to EcoCash.
+        </p>
+      </header>
+
+      <form onSubmit={(e) => void handleSubmit(e)} className="flex flex-col gap-6">
+        <div className="flex flex-col gap-1.5">
+          <label htmlFor="apply-pitch" className="text-sm font-medium text-ink">
+            What will you make?
+          </label>
           <textarea
+            id="apply-pitch"
             value={pitch}
             onChange={(e) => setPitch(e.target.value)}
             rows={6}
+            maxLength={MAX}
+            aria-describedby="apply-pitch-hint"
             placeholder="A weekly series on Harare's music scene…"
-            className="w-full bg-surface border border-line focus:border-accent text-ink rounded-md p-3 placeholder:text-ink-dim focus:outline-none transition"
+            className="w-full rounded border border-line bg-surface p-3 text-base text-ink placeholder:text-ink-3 outline-none focus:border-accent"
           />
-          <p className="mt-1 text-xs text-ink-dim">{pitch.length}/800 · minimum 20 characters</p>
+          <p id="apply-pitch-hint" className="text-xs text-ink-3 num">
+            {tooShort ? `At least ${MIN} characters · ` : ''}
+            {length}/{MAX}
+          </p>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium mb-1.5">
-            Pricing currency (locked once approved)
-          </label>
-          <div className="flex gap-2">
-            {CURRENCIES.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setCurrency(c)}
-                className={`text-sm font-medium px-4 py-2 rounded-md transition ${
-                  currency === c ? 'bg-accent text-bg' : 'bg-surface text-ink-mute hover:text-ink'
-                }`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
+        <div className="flex flex-col gap-1.5">
+          <Segmented<Currency>
+            legend="Price your videos in"
+            value={currency}
+            options={CURRENCIES}
+            onChange={setCurrency}
+          />
+          <p className="text-xs text-ink-3">
+            Locked once you&rsquo;re approved. Viewers can still pay in other currencies at the
+            day&rsquo;s rate.
+          </p>
         </div>
 
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/30 rounded-md px-4 py-3 text-sm">
-            {error}
-          </div>
-        )}
+        {error && <Notice tone="error">{error}</Notice>}
 
-        <div className="flex items-center gap-3 pt-2">
-          <button
-            type="submit"
-            disabled={submitting || pitch.trim().length < 20}
-            className="bg-accent hover:bg-accent-hot text-bg font-semibold py-2.5 px-6 rounded-md text-sm transition disabled:opacity-50"
-          >
-            {submitting ? 'Submitting…' : 'Submit application'}
-          </button>
-          <button
-            type="button"
-            onClick={() => router.push('/me')}
-            className="text-sm text-ink-mute hover:text-ink transition"
-          >
-            Cancel
-          </button>
-        </div>
+        <Button type="submit" size="lg" block loading={submitting} disabled={tooShort}>
+          Send application
+        </Button>
       </form>
     </div>
   );

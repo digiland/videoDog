@@ -1,29 +1,47 @@
 import type { ReactNode } from 'react';
-import { Inter } from 'next/font/google';
 import './globals.css';
-import NavBar from './components/NavBar';
-
-const sans = Inter({ subsets: ['latin'], variable: '--font-sans', display: 'swap' });
+import AppShell from './components/shell/AppShell';
 
 export const metadata = {
   title: 'StreamZW — Watch Zimbabwe',
   description: 'Stream Zimbabwean creators. Free, pay-per-view, and premium subscriptions.',
 };
 
+export const viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
+  themeColor: [
+    { media: '(prefers-color-scheme: dark)', color: '#121110' },
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+  ],
+};
+
+/** No web fonts: the system stack renders instantly and costs no data. */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={sans.variable}>
-      <body className="min-h-screen bg-bg text-ink antialiased" suppressHydrationWarning>
-        <NavBar />
-        <main>{children}</main>
-        <footer className="mt-24 border-t border-line">
-          <div className="max-w-screen-2xl mx-auto px-6 py-10 flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between text-sm text-ink-dim">
-            <div className="font-bold text-ink">
-              Stream<span className="text-accent">ZW</span>
-            </div>
-            <div>© {new Date().getFullYear()} StreamZW · Made in Zimbabwe</div>
-          </div>
-        </footer>
+    <html lang="en">
+      <body className="min-h-screen bg-bg text-ink antialiased pb-tabbar" suppressHydrationWarning>
+        <AppShell
+          footer={
+            <footer className="mt-16 border-t border-line">
+              <div className="flex flex-wrap gap-x-6 gap-y-2 px-4 py-8 text-sm text-ink-3 md:px-6">
+                <span>© {new Date().getFullYear()} StreamZW · Made in Zimbabwe</span>
+                <a href="/pricing" className="hover:text-ink">
+                  Premium
+                </a>
+                <a href="/courses" className="hover:text-ink">
+                  Courses
+                </a>
+                <a href="/me/apply" className="hover:text-ink">
+                  Become a creator
+                </a>
+              </div>
+            </footer>
+          }
+        >
+          {children}
+        </AppShell>
       </body>
     </html>
   );

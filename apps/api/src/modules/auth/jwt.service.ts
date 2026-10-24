@@ -20,20 +20,24 @@ export class JwtTokenService {
 
   signAccess(userId: string, role: string): string {
     const payload: AccessTokenPayload = { sub: userId, role, type: 'access' };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return this.jwt.sign(payload as any, {
-      secret: process.env.JWT_ACCESS_SECRET,
-      expiresIn: (process.env.JWT_ACCESS_TTL ?? '15m') as unknown as number,
-    });
+    return this.jwt.sign(
+      { ...payload },
+      {
+        secret: process.env.JWT_ACCESS_SECRET,
+        expiresIn: (process.env.JWT_ACCESS_TTL ?? '15m') as unknown as number,
+      },
+    );
   }
 
   signRefresh(userId: string, tokenId: string): string {
     const payload: RefreshTokenPayload = { sub: userId, jti: tokenId, type: 'refresh' };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return this.jwt.sign(payload as any, {
-      secret: process.env.JWT_REFRESH_SECRET,
-      expiresIn: (process.env.JWT_REFRESH_TTL ?? '30d') as unknown as number,
-    });
+    return this.jwt.sign(
+      { ...payload },
+      {
+        secret: process.env.JWT_REFRESH_SECRET,
+        expiresIn: (process.env.JWT_REFRESH_TTL ?? '30d') as unknown as number,
+      },
+    );
   }
 
   verifyAccess(token: string): AccessTokenPayload {

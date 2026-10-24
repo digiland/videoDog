@@ -1,7 +1,7 @@
 import { Controller, Get, HttpException, HttpStatus, Inject } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
 import type Redis from 'ioredis';
 import { REDIS } from '../../common/redis.module';
+import { pingDb } from './health.repository';
 import { DB, type Db } from '../../db/db.module';
 
 type HealthResponse = { ok: boolean; db: boolean; redis: boolean };
@@ -28,7 +28,7 @@ export class HealthController {
 
   private async pingDb(): Promise<boolean> {
     try {
-      await this.db.execute(sql`select 1`);
+      await pingDb(this.db);
       return true;
     } catch {
       return false;
