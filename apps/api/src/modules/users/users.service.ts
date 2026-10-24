@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, eq } from 'drizzle-orm';
+import { and, count, eq, ilike, inArray, or } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { users, videos } from '../../db/schema';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
@@ -111,6 +111,24 @@ export class UsersService {
       joined_at: u.createdAt,
       video_count: Number(videoCount?.n ?? 0),
     };
+  }
+
+  /** Creator channels whose name or handle contains `q` (search page). */
+  async searchChannels(q: string, limit = 6) {
+    const term = q.trim().replace(/^@/, '').slice(0, 100);
+    if (!term) return { items: [] };
+    const pattern = `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    const rows = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(
+        and(
+          inArray(users.role, ['creator', 'admin']),
+          or(ilike(users.displayName, pattern), ilike(users.handle, pattern)),
+        ),
+      )
+      .limit(limit);
+    return { items: await Promise.all(rows.map((r) => this.findChannel(r.id))) };
   }
 
   async findByPhone(phone: string) {

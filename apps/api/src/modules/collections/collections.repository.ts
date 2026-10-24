@@ -97,6 +97,17 @@ export class CollectionsRepository {
       .then((rows) => rows.map((r) => r.collection));
   }
 
+  /** Published collections matching `q` via their generated `search_doc`, best first. */
+  searchPublished(q: string, limit: number) {
+    const query = sql`websearch_to_tsquery('english', ${q})`;
+    return this.db
+      .select()
+      .from(collections)
+      .where(and(eq(collections.state, 'published'), sql`${collections}.search_doc @@ ${query}`))
+      .orderBy(sql`ts_rank(${collections}.search_doc, ${query}) DESC`, collections.id)
+      .limit(limit);
+  }
+
   /** Next free position at the end of a section (or of the unsectioned list). */
   async nextItemPosition(tx: DbOrTx, collectionId: string, sectionId: string | null) {
     const [row] = await tx

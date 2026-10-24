@@ -27,6 +27,8 @@ type AccessState =
 
 interface Props {
   videoId: string;
+  /** In a course or playlist: what to offer when this video ends. */
+  next?: { href: string; title: string; label: string } | null;
   initialThumbnailUrl: string | null;
   /** False when the anonymous server fetch failed (e.g. owner viewing an unpublished video). */
   hasServerMetadata: boolean;
@@ -53,7 +55,7 @@ function Pending() {
  */
 function Stage({ thumbnailUrl, children }: { thumbnailUrl: string | null; children: ReactNode }) {
   return (
-    <div className="relative grid grid-cols-1 overflow-hidden bg-surface md:rounded-md">
+    <div className="relative grid grid-cols-1 overflow-hidden bg-surface md:rounded-xl">
       <div className="aspect-video [grid-area:1/1]" aria-hidden="true" />
       {thumbnailUrl && (
         // eslint-disable-next-line @next/next/no-img-element -- short-lived signed thumbnail URL (see VideoCard).
@@ -78,10 +80,12 @@ function Stage({ thumbnailUrl, children }: { thumbnailUrl: string | null; childr
  */
 export default function VideoAccessSection({
   videoId,
+  next,
   initialThumbnailUrl,
   hasServerMetadata,
 }: Props) {
   const [state, setState] = useState<AccessState>({ status: 'loading' });
+  const [ended, setEnded] = useState(false);
   const [video, setVideo] = useState<Video | null>(null);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -162,7 +166,7 @@ export default function VideoAccessSection({
   return (
     <>
       {state.status === 'playable' ? (
-        <div className="relative aspect-video overflow-hidden bg-surface md:rounded-md">
+        <div className="relative aspect-video overflow-hidden bg-surface md:rounded-xl">
           <Player
             videoId={videoId}
             src={state.playlist.url}
@@ -170,7 +174,26 @@ export default function VideoAccessSection({
             captions={state.playlist.captions}
             poster={thumbnailUrl}
             onPlaylistExpired={handlePlaylistExpired}
+            onEnded={() => setEnded(true)}
           />
+          {ended && next && (
+            <div className="theme-dark absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-scrim p-4 text-center">
+              <p className="text-sm text-ink-2">{next.label}</p>
+              <p className="line-clamp-2 max-w-md text-lg font-semibold text-ink">{next.title}</p>
+              <div className="flex gap-2">
+                <LinkButton href={next.href} icon="play">
+                  Play next
+                </LinkButton>
+                <button
+                  type="button"
+                  onClick={() => setEnded(false)}
+                  className="inline-flex h-11 items-center rounded px-4 text-sm font-semibold text-ink hover:bg-surface-2"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <Stage thumbnailUrl={thumbnailUrl}>

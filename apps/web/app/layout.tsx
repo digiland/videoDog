@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import './globals.css';
-import NavBar from './components/NavBar';
+import AppShell from './components/shell/AppShell';
 
 export const metadata = {
   title: 'StreamZW — Watch Zimbabwe',
@@ -22,16 +22,26 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body className="min-h-screen bg-bg text-ink antialiased pb-tabbar" suppressHydrationWarning>
-        <NavBar />
-        <main>{children}</main>
-        <footer className="mt-16 border-t border-line">
-          <div className="max-w-screen-xl mx-auto px-4 py-8 flex flex-wrap gap-x-6 gap-y-2 text-sm text-ink-3">
-            <span>© {new Date().getFullYear()} StreamZW · Made in Zimbabwe</span>
-            <a href="/pricing" className="hover:text-ink">
-              Premium
-            </a>
-          </div>
-        </footer>
+        <AppShell
+          footer={
+            <footer className="mt-16 border-t border-line">
+              <div className="flex flex-wrap gap-x-6 gap-y-2 px-4 py-8 text-sm text-ink-3 md:px-6">
+                <span>© {new Date().getFullYear()} StreamZW · Made in Zimbabwe</span>
+                <a href="/pricing" className="hover:text-ink">
+                  Premium
+                </a>
+                <a href="/courses" className="hover:text-ink">
+                  Courses
+                </a>
+                <a href="/me/apply" className="hover:text-ink">
+                  Become a creator
+                </a>
+              </div>
+            </footer>
+          }
+        >
+          {children}
+        </AppShell>
       </body>
     </html>
   );

@@ -28,6 +28,8 @@ interface PlayerProps {
    * false if a fresh URL could not be obtained.
    */
   onPlaylistExpired?: () => Promise<boolean>;
+  /** Playback reached the end (the watch page offers the next lesson; it never autoplays). */
+  onEnded?: () => void;
 }
 
 interface HlsLevel {
@@ -75,6 +77,7 @@ export default function Player({
   captions = [],
   poster,
   onPlaylistExpired,
+  onEnded,
 }: PlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -396,6 +399,7 @@ export default function Player({
     setWaiting(false);
     stopHeartbeat();
     void endSession();
+    onEnded?.();
   }
 
   function togglePlay() {

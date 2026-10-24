@@ -4,13 +4,13 @@ import type { Video } from '../../src/types/api';
 import { Button, LinkButton } from '../../src/ui/button';
 import { Notice } from '../../src/ui/notice';
 import { EmptyState } from '../../src/ui/state';
-import { fetchCatalog, type ModeKey } from './viewer/catalog';
+import { type CatalogFilter, fetchCatalog, homeHref } from './viewer/catalog';
 import VideoGrid from './viewer/VideoGrid';
 
 interface CatalogClientProps {
   initialItems: Video[];
   initialCursor: string | null;
-  mode: ModeKey;
+  filter: CatalogFilter;
   /** The server-side first page failed to load (as opposed to an empty catalogue). */
   failed?: boolean;
 }
@@ -18,12 +18,12 @@ interface CatalogClientProps {
 /**
  * The catalogue grid. The first page arrives server-rendered; more pages load only when
  * the viewer asks ("Load more"), so nobody spends data on thumbnails they never scroll to
- * and the footer stays reachable. Remounted per filter (keyed by mode in the page).
+ * and the footer stays reachable. Remounted per filter (keyed by the filter in the page).
  */
 export default function CatalogClient({
   initialItems,
   initialCursor,
-  mode,
+  filter,
   failed,
 }: CatalogClientProps) {
   const [videos, setVideos] = useState<Video[]>(initialItems);
@@ -33,7 +33,7 @@ export default function CatalogClient({
   async function loadMore() {
     if (!cursor || status === 'loading') return;
     setStatus('loading');
-    const page = await fetchCatalog(mode, cursor);
+    const page = await fetchCatalog(filter, cursor);
     if (!page) {
       setStatus('error');
       return;
@@ -51,7 +51,7 @@ export default function CatalogClient({
       <EmptyState
         title="Couldn't load videos"
         action={
-          <LinkButton href={mode === 'all' ? '/' : `/?mode=${mode}`} variant="secondary">
+          <LinkButton href={homeHref(filter)} variant="secondary">
             Try again
           </LinkButton>
         }
@@ -62,14 +62,16 @@ export default function CatalogClient({
       <EmptyState
         title="Nothing here yet"
         action={
-          mode !== 'all' && (
+          (filter.mode !== 'all' || filter.category) && (
             <LinkButton href="/" variant="secondary">
               Show all videos
             </LinkButton>
           )
         }
       >
-        New videos show up here as soon as creators publish them.
+        {filter.category || filter.mode !== 'all'
+          ? 'No videos match this filter yet.'
+          : 'New videos show up here as soon as creators publish them.'}
       </EmptyState>
     );
   }

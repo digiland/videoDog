@@ -1,3 +1,5 @@
+import type { ContentCategory } from '@streamzw/shared';
+
 export interface User {
   id: string;
   phone_e164: string;
@@ -12,6 +14,58 @@ export interface User {
   created_at: string;
 }
 
+export type { ContentCategory };
+export type AccessMode = 'free' | 'ppv' | 'premium' | 'premium_buyable';
+
+export interface CreatorRef {
+  id?: string;
+  display_name: string | null;
+  handle: string | null;
+}
+
+export interface Channel {
+  id: string;
+  handle: string | null;
+  display_name: string | null;
+  joined_at: string;
+  video_count: number;
+}
+
+export interface CollectionSummary {
+  id: string;
+  owner_id: string;
+  kind: 'course' | 'playlist';
+  category: ContentCategory;
+  title: string;
+  description: string | null;
+  state: 'draft' | 'published' | 'unpublished';
+  published_at: string | null;
+  created_at: string;
+  video_count: number;
+  duration_seconds: number;
+  access_modes: Partial<Record<AccessMode, number>>;
+  thumbnail_url: string | null;
+  cover_video_id: string | null;
+  creator: CreatorRef | null;
+}
+
+export interface CollectionEntry {
+  id: string;
+  section_id: string | null;
+  position: number;
+  video: Video;
+}
+
+export interface CollectionDetail extends CollectionSummary {
+  sections: { id: string; title: string; position: number; items: CollectionEntry[] }[];
+  unsectioned: CollectionEntry[];
+}
+
+export interface CollectionListResponse {
+  items: CollectionSummary[];
+  next_cursor: string | null;
+}
+
 export interface MoneyDTO {
   amount_minor: string;
   currency: string;
@@ -22,7 +76,8 @@ export interface Video {
   owner_id: string;
   title: string;
   description: string | null;
-  access_mode: 'free' | 'ppv' | 'premium' | 'premium_buyable';
+  access_mode: AccessMode;
+  category: ContentCategory;
   ppv_price_minor_units: string | null;
   ppv_price_currency: string | null;
   in_premium_pool: boolean;
@@ -30,9 +85,13 @@ export interface Video {
   duration_seconds: number | null;
   thumbnail_key: string | null;
   thumbnail_url: string | null;
+  view_count?: number;
   published_at: string | null;
   created_at: string;
-  creator?: { display_name: string | null; handle: string | null };
+  creator?: CreatorRef | null;
+  /** Watch history / purchases only. */
+  watched_at?: string | null;
+  purchased_at?: string | null;
   access_check_result?: AccessResult;
   comments_enabled?: boolean;
 }

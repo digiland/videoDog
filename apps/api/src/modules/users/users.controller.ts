@@ -7,6 +7,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -31,6 +32,11 @@ const ApplyCreatorSchema = z.object({
 @Controller('channels')
 export class ChannelsController {
   constructor(private readonly users: UsersService) {}
+
+  @Get()
+  async search(@Query('q') q?: string) {
+    return this.users.searchChannels(q ?? '');
+  }
 
   @Get(':ref')
   async channel(@Param('ref') ref: string) {

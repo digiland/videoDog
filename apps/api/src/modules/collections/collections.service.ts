@@ -43,6 +43,7 @@ const ListSchema = z.object({
   category: z.enum(CONTENT_CATEGORIES).optional(),
   kind: z.enum(['course', 'playlist']).optional(),
   video: z.string().uuid().optional(),
+  q: z.string().trim().min(1).max(200).optional(),
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
@@ -320,6 +321,10 @@ export class CollectionsService {
   /** Published collections, newest first; filter by creator, category, kind or video. */
   async listPublic(query: unknown) {
     const q = parse(ListSchema, query);
+    if (q.q) {
+      const rows = await this.repo.searchPublished(q.q, q.limit);
+      return { items: await this.summaries(rows), next_cursor: null };
+    }
     if (q.video) {
       const rows = await this.repo.publishedContaining(q.video);
       return { items: await this.summaries(rows), next_cursor: null };

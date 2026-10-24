@@ -1,8 +1,16 @@
+import { CATEGORY_LABELS } from '@streamzw/shared';
 import Link from 'next/link';
 import CatalogClient from './components/CatalogClient';
-import { fetchCatalog, parseMode, type ModeKey } from './components/viewer/catalog';
-import ModeChips from './components/viewer/ModeChips';
-import { GridSection } from './components/viewer/VideoGrid';
+import {
+  fetchCatalog,
+  fetchCollections,
+  homeHref,
+  type ModeKey,
+  parseCategory,
+  parseMode,
+} from './components/viewer/catalog';
+import FilterChips from './components/viewer/FilterChips';
+import { CollectionShelf, GridSection } from './components/viewer/VideoGrid';
 
 const HINTS: Partial<Record<ModeKey, { text: string; link?: { href: string; label: string } }>> = {
   free: { text: 'Free to watch. You only spend data.' },
@@ -14,26 +22,41 @@ const HINTS: Partial<Record<ModeKey, { text: string; link?: { href: string; labe
 };
 
 /**
- * Home: the catalogue itself, no hero. A phone screen shows filters plus two rows of
- * videos with their prices — something to watch within one thumb-scroll.
+ * Home: YouTube's layout — a chip bar of topics and prices, a shelf of courses and
+ * playlists for the topic, then the video grid. No hero: something to watch within one
+ * thumb-scroll.
  */
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ mode?: string }>;
+  searchParams: Promise<{ mode?: string; category?: string }>;
 }) {
-  const mode = parseMode((await searchParams).mode);
-  const data = await fetchCatalog(mode, null, { next: { revalidate: 60 } });
-  const hint = HINTS[mode];
+  const sp = await searchParams;
+  const filter = { mode: parseMode(sp.mode), category: parseCategory(sp.category) };
+  const [data, collections] = await Promise.all([
+    fetchCatalog(filter, null, { next: { revalidate: 60 } }),
+    filter.mode === 'all'
+      ? fetchCollections({ category: filter.category, limit: '12' }, { next: { revalidate: 60 } })
+      : Promise.resolve(null),
+  ]);
+  const hint = HINTS[filter.mode];
+  const shelfTitle =
+    filter.category === 'education'
+      ? 'Courses'
+      : filter.category
+        ? `${CATEGORY_LABELS[filter.category]} collections`
+        : 'Courses & playlists';
 
   return (
     <GridSection>
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <h1 className="sr-only text-xl font-bold text-ink md:not-sr-only">Watch</h1>
-        <ModeChips active={mode} hrefFor={(m) => (m === 'all' ? '/' : `/?mode=${m}`)} />
+      <h1 className="sr-only">
+        {filter.category ? CATEGORY_LABELS[filter.category] : 'Watch'} on StreamZW
+      </h1>
+      <div className="sticky top-14 z-30 -mx-4 bg-bg px-4 py-3 md:-mx-6 md:px-6">
+        <FilterChips category={filter.category} mode={filter.mode} hrefFor={(f) => homeHref(f)} />
       </div>
       {hint && (
-        <p className="-mt-1 text-sm text-ink-3">
+        <p className="-mt-3 text-sm text-ink-3">
           {hint.text}{' '}
           {hint.link && (
             <Link href={hint.link.href} className="font-semibold text-accent hover:underline">
@@ -42,9 +65,21 @@ export default async function HomePage({
           )}
         </p>
       )}
+      <CollectionShelf
+        title={shelfTitle}
+        collections={collections?.items ?? []}
+        action={
+          <Link
+            href={filter.category ? `/courses?category=${filter.category}` : '/courses'}
+            className="shrink-0 rounded-full px-3 py-1.5 text-sm font-semibold text-accent hover:bg-surface-2"
+          >
+            See all
+          </Link>
+        }
+      />
       <CatalogClient
-        key={mode}
-        mode={mode}
+        key={homeHref(filter)}
+        filter={filter}
         initialItems={data?.items ?? []}
         initialCursor={data?.next_cursor ?? null}
         failed={data === null}
