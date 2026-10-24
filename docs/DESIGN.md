@@ -57,6 +57,21 @@ Every text/background pair above passes WCAG AA (4.5:1) on `bg`, `surface` and `
 | `EmptyState`, `Skeleton`              | Calm empty/error states with one next step; static placeholders that match final layout.                                                          |
 | `useDataSaver`                        | Data Saver preference: the viewer's choice, else the browser's Save-Data/2G signal.                                                               |
 
+## Layout (YouTube's structure on Kopje's tokens)
+
+- **Shell** (`app/components/shell/AppShell.tsx`): top bar with menu, wordmark, a centred
+  pill search box, Upload (creators) and account. A guide on the left: full from `lg`, an
+  icon rail at `md`, a drawer on phones and on the watch page. Phones keep the bottom tab
+  bar (Home, Courses, Studio for creators, Library, You).
+- **Chip bar**: topics first, then price, as links (`FilterChips`). Selected chip is
+  `bg-ink text-bg`.
+- **Video card**: 16:9 thumbnail (`rounded-lg`), channel avatar beside a two-line title,
+  channel, views · age, and the `AccessChip`. One column on phones, up to four on wide screens.
+- **Watch page**: player and details left; course/playlist panel and related videos right
+  (below on phones). A finished lesson offers "Play next"; it never autoplays.
+- **Course page**: summary panel (cover, Start the course, what the lessons cost) beside the
+  lessons grouped by section.
+
 ## Patterns
 
 - **Video tile:** 16:9 thumbnail (`loading="lazy"`, `decoding="async"`, explicit size), title (2 lines max), creator, duration, `AccessChip`. No hover-preview video.
