@@ -8,11 +8,12 @@ import { VideosService } from './videos.service';
 import { PlaybackController } from './playback.controller';
 import { PlaybackService } from './playback.service';
 import { VideosRepository } from './videos.repository';
+import { LivePlaybackService } from './live-playback.service';
 
 @Module({
   imports: [AuthModule, FxModule],
   controllers: [VideosController, AdminGrantsController, PurchasesController, PlaybackController],
-  providers: [VideosService, AccessService, PlaybackService, VideosRepository],
+  providers: [VideosService, AccessService, PlaybackService, VideosRepository, LivePlaybackService],
   exports: [VideosService, AccessService],
 })
 export class VideosModule {}

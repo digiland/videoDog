@@ -26,6 +26,7 @@ describe.skipIf(!hasDb)('watch heartbeats (integration)', () => {
       services(db).fx,
       {} as never,
       {} as never,
+      {} as never,
     );
     watch = new WatchService(db, videos, access, new WatchRepository(db));
   });

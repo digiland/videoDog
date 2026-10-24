@@ -4,6 +4,7 @@ import { VideosService } from './videos.service';
 import { AccessService } from './access.service';
 import { PlaybackService } from './playback.service';
 import { VideosRepository } from './videos.repository';
+import { LivePlaybackService } from './live-playback.service';
 import { eq } from 'drizzle-orm';
 import { purchases, videos as videosTable } from '../../db/schema';
 import type { Db } from '../../db/db.module';
@@ -32,6 +33,7 @@ describe.skipIf(!hasDb)('video visibility and playback grants (integration)', ()
       fx,
       new PlaybackService(storage),
       new VideosRepository(db),
+      new LivePlaybackService(),
     );
   });
   afterAll(async () => close());

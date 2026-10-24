@@ -7,6 +7,7 @@ import { OxrClient } from '../modules/fx/oxr.client';
 import { SubscriptionsService } from '../modules/subscriptions/subscriptions.service';
 import { PaymentsService } from '../modules/payments/payments.service';
 import { WalletService } from '../modules/wallet/wallet.service';
+import { LiveService } from '../modules/live/live.service';
 import { bullmqConnection } from '../common/bullmq-connection';
 
 @Injectable()
@@ -22,6 +23,7 @@ export class SchedulerService {
     private readonly subscriptionsService: SubscriptionsService,
     private readonly paymentsService: PaymentsService,
     private readonly walletService: WalletService,
+    private readonly liveService: LiveService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.premiumPoolQueue = new Queue('payouts.calculate_premium_pool', {
@@ -155,6 +157,18 @@ export class SchedulerService {
       if (n > 0) this.logger.log(`Processed ${n} payouts`);
     } catch (err) {
       this.logger.error('Payout processing failed', err);
+    }
+  }
+
+  /** End live streams whose ingest is gone past the grace period; drop unclaimed replays. */
+  @Cron('* * * * *')
+  async sweepLive() {
+    try {
+      const r = await this.liveService.sweep();
+      if (r.ended > 0 || r.recordings_failed > 0)
+        this.logger.log(`Live sweep: ${JSON.stringify(r)}`);
+    } catch (err) {
+      this.logger.error('Live sweep failed', err);
     }
   }
 }

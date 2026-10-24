@@ -1,11 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, inArray, lt, ne, or } from 'drizzle-orm';
 import { Queue } from 'bullmq';
-import { DB, type Db } from '../../db/db.module';
-import { captions, users as schema_users, videos, purchases } from '../../db/schema';
+import { DB, type Db, type DbOrTx } from '../../db/db.module';
+import { captions, liveStreams, users as schema_users, videos, purchases } from '../../db/schema';
 import { StorageService } from '../../storage/storage.service';
 import { AccessService } from './access.service';
 import { PlaybackService } from './playback.service';
+import { LivePlaybackService, ReplayProcessingError } from './live-playback.service';
 import { VideosRepository } from './videos.repository';
 import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
@@ -56,6 +57,7 @@ export class VideosService {
     private readonly fx: FxService,
     private readonly playback: PlaybackService,
     private readonly repo: VideosRepository,
+    private readonly livePlayback: LivePlaybackService,
   ) {
     const redisUrl = process.env.REDIS_URL ?? 'redis://localhost:6379';
     this.transcodeQueue = new Queue('transcode', {
@@ -103,6 +105,39 @@ export class VideosService {
       presigned_url: presignedUrl,
       key,
     };
+  }
+
+  /**
+   * The videos row behind a live stream: same validation and pricing rules as an upload,
+   * published at once (an upcoming stream can be found, shared and pre-bought) and with no
+   * media until the stream starts. LiveService owns the rest.
+   */
+  async createLiveVideo(ownerId: string, body: unknown, tx: DbOrTx = this.db) {
+    const parsed = CreateVideoSchema.safeParse(body);
+    if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
+    const dto = parsed.data;
+    if (
+      (dto.access_mode === 'ppv' || dto.access_mode === 'premium_buyable') &&
+      (!dto.ppv_price_minor_units || !dto.ppv_price_currency)
+    ) {
+      throw new ValidationError('A price is required for pay-once streams');
+    }
+    await this.assertPricingCurrency(ownerId, dto.ppv_price_currency);
+    const [video] = await tx
+      .insert(videos)
+      .values({
+        ownerId,
+        title: dto.title,
+        description: dto.description,
+        accessMode: dto.access_mode,
+        category: dto.category ?? 'other',
+        ppvPriceMinorUnits: dto.ppv_price_minor_units ? String(dto.ppv_price_minor_units) : null,
+        ppvPriceCurrency: dto.ppv_price_currency ?? null,
+        state: 'published',
+        publishedAt: new Date(),
+      })
+      .returning();
+    return video!;
   }
 
   // ─── Resumable multipart upload ──────────────────────────────────────────
@@ -451,7 +486,26 @@ export class VideosService {
 
   private async withCreators(rows: VideoRow[]) {
     const ownerIds = Array.from(new Set(rows.map((v) => v.ownerId)));
-    const views = await this.repo.viewCounts(rows.map((v) => v.id));
+    const ids = rows.map((v) => v.id);
+    const [views, lives] = await Promise.all([
+      this.repo.viewCounts(ids),
+      ids.length
+        ? this.db
+            .select({
+              id: liveStreams.id,
+              videoId: liveStreams.videoId,
+              state: liveStreams.state,
+              scheduledAt: liveStreams.scheduledAt,
+              startedAt: liveStreams.startedAt,
+              endedAt: liveStreams.endedAt,
+              sourceHeight: liveStreams.sourceHeight,
+              recordingState: liveStreams.recordingState,
+            })
+            .from(liveStreams)
+            .where(inArray(liveStreams.videoId, ids))
+        : Promise.resolve([]),
+    ]);
+    const liveByVideo = new Map(lives.map((l) => [l.videoId, l]));
     const creators = ownerIds.length
       ? await this.db
           .select({
@@ -469,6 +523,7 @@ export class VideosService {
         return {
           ...(await this.serialize(v, views.get(v.id) ?? 0)),
           creator: c ? { id: c.id, handle: c.handle, display_name: c.displayName } : null,
+          live: liveInfo(liveByVideo.get(v.id)),
         };
       }),
     );
@@ -480,7 +535,23 @@ export class VideosService {
     // Paywall first: someone without access learns how to unlock, not that media is missing.
     const access = await this.access.checkAccess(await this.accessUser(viewer), video);
     if (!access.ok) return { access_denied: true, paywall: access.paywall };
-    if (!video.hlsPlaylistKey) throw new ResourceNotFoundError('Playable video');
+
+    // Live streams: the live origin while on air; the recording (a normal HLS key) after.
+    const [live] = await this.db
+      .select()
+      .from(liveStreams)
+      .where(eq(liveStreams.videoId, video.id))
+      .limit(1);
+    if (live?.state === 'live') return { ...this.livePlayback.grant(live.id), captions: [] };
+    if (live?.state === 'scheduled') {
+      return { upcoming: true, scheduled_at: live.scheduledAt?.toISOString() ?? null };
+    }
+    if (!video.hlsPlaylistKey) {
+      if (live?.state === 'ended' && live.recordingState === 'pending') {
+        throw new ReplayProcessingError();
+      }
+      throw new ResourceNotFoundError('Playable video');
+    }
 
     const grant = await this.playback.grant(video.id, video.hlsPlaylistKey, apiBase);
 
@@ -738,4 +809,28 @@ export class VideosService {
 
     return this.serialize(updated!);
   }
+}
+
+type LiveRow = {
+  id: string;
+  state: 'scheduled' | 'live' | 'ended' | 'cancelled';
+  scheduledAt: Date | null;
+  startedAt: Date | null;
+  endedAt: Date | null;
+  sourceHeight: number | null;
+  recordingState: 'none' | 'pending' | 'ready' | 'failed';
+};
+
+/** What viewers see about a video's live stream (null for ordinary uploads). */
+function liveInfo(l: LiveRow | undefined) {
+  if (!l) return null;
+  return {
+    id: l.id,
+    state: l.state,
+    scheduled_at: l.scheduledAt,
+    started_at: l.startedAt,
+    ended_at: l.endedAt,
+    source_height: l.sourceHeight,
+    replay: l.recordingState === 'ready',
+  };
 }

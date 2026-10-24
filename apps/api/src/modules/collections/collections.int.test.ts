@@ -5,6 +5,7 @@ import { VideosService } from '../videos/videos.service';
 import { AccessService } from '../videos/access.service';
 import { PlaybackService } from '../videos/playback.service';
 import { VideosRepository } from '../videos/videos.repository';
+import { LivePlaybackService } from '../videos/live-playback.service';
 import { CollectionsService } from './collections.service';
 import { CollectionsRepository } from './collections.repository';
 import { UsersService } from '../users/users.service';
@@ -35,6 +36,7 @@ describe.skipIf(!hasDb)('collections (integration)', () => {
       fx,
       new PlaybackService(storage),
       new VideosRepository(db),
+      new LivePlaybackService(),
     );
     collections = new CollectionsService(db, videos, new CollectionsRepository(db));
     users = new UsersService(db, {} as OtpService);

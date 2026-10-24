@@ -12,6 +12,7 @@ import { UsersModule } from './modules/users/users.module';
 import { FxModule } from './modules/fx/fx.module';
 import { VideosModule } from './modules/videos/videos.module';
 import { CollectionsModule } from './modules/collections/collections.module';
+import { LiveModule } from './modules/live/live.module';
 import { WatchModule } from './modules/watch/watch.module';
 import { SearchModule } from './modules/search/search.module';
 import { PaymentsModule } from './modules/payments/payments.module';
@@ -44,6 +45,7 @@ import { SchedulerService } from './workers/scheduler.service';
     FxModule,
     VideosModule,
     CollectionsModule,
+    LiveModule,
     WatchModule,
     SearchModule,
     PaymentsModule,
