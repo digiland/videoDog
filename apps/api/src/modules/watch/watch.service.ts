@@ -67,6 +67,14 @@ export class WatchService {
     if (!(await this.repo.exists(where))) throw new ResourceNotFoundError('Watch session');
   }
 
+  /** Watch history: published videos the viewer started, most recent first. */
+  async history(userId: string, limit = 48) {
+    const rows = await this.repo.recentVideoIds(userId, Math.min(Math.max(limit, 1), 100));
+    const watchedAt = new Map(rows.map((r) => [r.videoId, r.at]));
+    const items = await this.videos.listByIds(rows.map((r) => r.videoId));
+    return { items: items.map((v) => ({ ...v, watched_at: watchedAt.get(v.id) ?? null })) };
+  }
+
   async endSession(sessionId: string, userId: string | null): Promise<void> {
     const conditions = [eq(watchSessions.id, sessionId)];
     if (userId) conditions.push(eq(watchSessions.userId, userId));

@@ -23,6 +23,17 @@ export const videoState = pgEnum('video_state', [
   'failed',
 ]);
 
+export const contentCategory = pgEnum('content_category', [
+  'education',
+  'comedy',
+  'drama',
+  'music',
+  'faith',
+  'sports',
+  'lifestyle',
+  'other',
+]);
+
 export const videos = pgTable(
   'videos',
   {
@@ -35,6 +46,7 @@ export const videos = pgTable(
     title: text('title').notNull(),
     description: text('description'),
     accessMode: accessMode('access_mode').notNull(),
+    category: contentCategory('category').notNull().default('other'),
     ppvPriceMinorUnits: text('ppv_price_minor_units'), // stored as text, cast to bigint in app
     ppvPriceCurrency: char('ppv_price_currency', { length: 3 }),
     // in_premium_pool is GENERATED ALWAYS in DB — read-only; not mapped for writes

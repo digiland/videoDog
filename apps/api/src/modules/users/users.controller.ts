@@ -27,6 +27,17 @@ const ApplyCreatorSchema = z.object({
   canonical_currency: z.enum(CURRENCY_CODES),
 });
 
+/** Public creator channels (no sign-in needed). */
+@Controller('channels')
+export class ChannelsController {
+  constructor(private readonly users: UsersService) {}
+
+  @Get(':ref')
+  async channel(@Param('ref') ref: string) {
+    return this.users.findChannel(ref);
+  }
+}
+
 @Controller()
 @UseGuards(JwtGuard, RequireAuthGuard)
 export class UsersController {

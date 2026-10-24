@@ -125,6 +125,8 @@ export class VideosController {
   async list(
     @Req() req: AuthenticatedRequest,
     @Query('mode') mode?: string,
+    @Query('category') category?: string,
+    @Query('exclude') exclude?: string,
     @Query('creator') creatorId?: string,
     @Query('q') q?: string,
     @Query('limit') limit?: string,
@@ -136,6 +138,8 @@ export class VideosController {
     }
     return this.videos.list({
       mode,
+      category,
+      excludeId: exclude && z.string().uuid().safeParse(exclude).success ? exclude : undefined,
       creatorId,
       q,
       limit: limit ? parseInt(limit, 10) : undefined,
@@ -232,5 +236,10 @@ export class PurchasesController {
   @Post()
   async create(@Req() req: AuthenticatedRequest, @Body() body: unknown) {
     return this.videos.createPurchase(req.user.id, body);
+  }
+
+  @Get('me')
+  async mine(@Req() req: AuthenticatedRequest) {
+    return this.videos.listPurchased(req.user.id);
   }
 }

@@ -1,10 +1,10 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { eq } from 'drizzle-orm';
+import { and, count, eq } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
-import { users } from '../../db/schema';
+import { users, videos } from '../../db/schema';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
-import { CURRENCY_CODES, isCurrencyCode } from '@streamzw/shared';
+import { CURRENCY_CODES, HANDLE_PATTERN, isCurrencyCode } from '@streamzw/shared';
 import { nationalIds } from '../../db/schema';
 import { OtpService } from '../auth/otp.service';
 import { NationalIdCrypto, normaliseZimNationalId } from './national-id.crypto';
@@ -13,6 +13,18 @@ const PHONE_E164 = /^\+[1-9]\d{1,14}$/;
 
 const UpdateUserSchema = z.object({
   display_name: z.string().min(1).max(100).optional(),
+  handle: z
+    .string()
+    .transform((h) => h.trim().replace(/^@/, '').toLowerCase())
+    .pipe(
+      z
+        .string()
+        .regex(
+          HANDLE_PATTERN,
+          'Handle must be 3–30 letters, numbers, dots or underscores, starting with a letter or number',
+        ),
+    )
+    .optional(),
   preferred_display_currency: z.enum(CURRENCY_CODES).optional(),
   preferred_payout_currency: z.enum(CURRENCY_CODES).optional(),
 });
@@ -21,6 +33,8 @@ const SetPayoutMsisdnSchema = z.object({
   msisdn: z.string().regex(PHONE_E164, 'msisdn must be E.164, e.g. +263771234567'),
   otp_code: z.string().regex(/^\d{6}$/, 'otp_code must be the 6-digit code'),
 });
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const NationalIdSchema = z.object({ national_id: z.string().min(8).max(32) });
 
@@ -67,6 +81,38 @@ export class UsersService {
     return serializeUser(user);
   }
 
+  /**
+   * A creator's public channel, by handle (`@name` or `name`) or user id. Viewers and
+   * unknown handles 404 alike. Only public fields: never phone or payout details.
+   */
+  async findChannel(ref: string) {
+    const key = ref.trim().replace(/^@/, '');
+    const where = UUID.test(key) ? eq(users.id, key) : eq(users.handle, key.toLowerCase());
+    const [u] = await this.db
+      .select({
+        id: users.id,
+        handle: users.handle,
+        displayName: users.displayName,
+        role: users.role,
+        createdAt: users.createdAt,
+      })
+      .from(users)
+      .where(where)
+      .limit(1);
+    if (!u || u.role === 'viewer') throw new ResourceNotFoundError('Channel');
+    const [videoCount] = await this.db
+      .select({ n: count() })
+      .from(videos)
+      .where(and(eq(videos.ownerId, u.id), eq(videos.state, 'published')));
+    return {
+      id: u.id,
+      handle: u.handle,
+      display_name: u.displayName,
+      joined_at: u.createdAt,
+      video_count: Number(videoCount?.n ?? 0),
+    };
+  }
+
   async findByPhone(phone: string) {
     const [user] = await this.db.select().from(users).where(eq(users.phoneE164, phone)).limit(1);
     return user ?? null;
@@ -91,10 +137,19 @@ export class UsersService {
     if (!parsed.success) throw new ValidationError(parsed.error.issues[0]?.message ?? 'Invalid');
 
     const dto = parsed.data;
+    if (dto.handle !== undefined) {
+      const [taken] = await this.db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.handle, dto.handle))
+        .limit(1);
+      if (taken && taken.id !== id) throw new ValidationError('That handle is taken');
+    }
     const [updated] = await this.db
       .update(users)
       .set({
         ...(dto.display_name !== undefined && { displayName: dto.display_name }),
+        ...(dto.handle !== undefined && { handle: dto.handle }),
         ...(dto.preferred_display_currency !== undefined && {
           preferredDisplayCurrency: dto.preferred_display_currency,
         }),

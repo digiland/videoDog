@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, sql, type SQL } from 'drizzle-orm';
+import { and, desc, eq, sql, type SQL } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
 import { watchSessions } from '../../db/schema';
 
@@ -49,5 +49,19 @@ export class WatchRepository {
       .where(where)
       .limit(1);
     return !!row;
+  }
+
+  /** The viewer's most recently watched videos, newest first, one row per video. */
+  async recentVideoIds(userId: string, limit: number) {
+    const latest = this.db
+      .selectDistinctOn([watchSessions.videoId], {
+        videoId: watchSessions.videoId,
+        at: watchSessions.startedAt,
+      })
+      .from(watchSessions)
+      .where(eq(watchSessions.userId, userId))
+      .orderBy(watchSessions.videoId, desc(watchSessions.startedAt))
+      .as('latest');
+    return this.db.select().from(latest).orderBy(desc(latest.at)).limit(limit);
   }
 }

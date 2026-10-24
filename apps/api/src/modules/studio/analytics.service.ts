@@ -1,11 +1,24 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, count, countDistinct, eq, gte, lte, sum } from 'drizzle-orm';
 import { DB, type Db } from '../../db/db.module';
-import { watchMinutesDaily, watchSessions, purchases } from '../../db/schema';
+import { watchMinutesDaily, watchSessions, purchases, videos } from '../../db/schema';
+import { ResourceNotFoundError } from '../auth/errors';
 
 @Injectable()
 export class AnalyticsService {
   constructor(@Inject(DB) private readonly db: Db) {}
+
+  /** Analytics are the owner's (or an admin's) only; anyone else gets a plain 404. */
+  async assertCanView(videoId: string, user: { id: string; role: string }) {
+    const [v] = await this.db
+      .select({ ownerId: videos.ownerId })
+      .from(videos)
+      .where(eq(videos.id, videoId))
+      .limit(1);
+    if (!v || (v.ownerId !== user.id && user.role !== 'admin')) {
+      throw new ResourceNotFoundError('Video');
+    }
+  }
 
   async watchMinutes(videoId: string, from: Date, to: Date): Promise<bigint> {
     // Try daily aggregates first

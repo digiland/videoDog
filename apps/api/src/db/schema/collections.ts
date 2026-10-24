@@ -11,7 +11,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 import { users } from './users';
-import { videos } from './videos';
+import { contentCategory, videos } from './videos';
 
 // Courses and playlists group a creator's own videos. Grouping only — access stays
 // per video through VideosService.checkAccess. Ordering rules live in migration 0015.
@@ -28,6 +28,7 @@ export const collections = pgTable(
       .notNull()
       .references(() => users.id),
     kind: collectionKind('kind').notNull(),
+    category: contentCategory('category').notNull().default('other'),
     title: text('title').notNull(),
     description: text('description'),
     thumbnailKey: text('thumbnail_key'),

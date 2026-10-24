@@ -15,11 +15,13 @@ export class SearchController {
   async search(
     @Query('q') q?: string,
     @Query('mode') mode?: string,
+    @Query('category') category?: string,
     @Query('limit') limit?: string,
   ) {
     const { items } = await this.videos.list({
       q: q?.trim() || undefined,
       mode,
+      category,
       limit: limit ? Number.parseInt(limit, 10) : undefined,
     });
     return { items, total: items.length };

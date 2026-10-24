@@ -11,6 +11,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { FxModule } from './modules/fx/fx.module';
 import { VideosModule } from './modules/videos/videos.module';
+import { CollectionsModule } from './modules/collections/collections.module';
 import { WatchModule } from './modules/watch/watch.module';
 import { SearchModule } from './modules/search/search.module';
 import { PaymentsModule } from './modules/payments/payments.module';
@@ -42,6 +43,7 @@ import { SchedulerService } from './workers/scheduler.service';
     UsersModule,
     FxModule,
     VideosModule,
+    CollectionsModule,
     WatchModule,
     SearchModule,
     PaymentsModule,

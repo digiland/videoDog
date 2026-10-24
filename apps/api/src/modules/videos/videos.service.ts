@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, inArray, lt, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, ne, or } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { DB, type Db } from '../../db/db.module';
 import { captions, users as schema_users, videos, purchases } from '../../db/schema';
@@ -9,7 +9,7 @@ import { PlaybackService } from './playback.service';
 import { VideosRepository } from './videos.repository';
 import { FxService } from '../fx/fx.service';
 import { assertTransition } from './state';
-import { CURRENCY_CODES, originalKey, Money } from '@streamzw/shared';
+import { CONTENT_CATEGORIES, CURRENCY_CODES, originalKey, Money } from '@streamzw/shared';
 import type { CurrencyCode } from '@streamzw/shared';
 import { ResourceNotFoundError, ValidationError } from '../auth/errors';
 import { z } from 'zod';
@@ -19,6 +19,7 @@ const CreateVideoSchema = z.object({
   title: z.string().min(1).max(255),
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']),
+  category: z.enum(CONTENT_CATEGORIES).optional(),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional(),
   ppv_price_currency: z.enum(CURRENCY_CODES).optional(),
 });
@@ -27,6 +28,7 @@ const UpdateVideoSchema = z.object({
   title: z.string().min(1).max(255).optional(),
   description: z.string().max(5000).optional(),
   access_mode: z.enum(['free', 'ppv', 'premium', 'premium_buyable']).optional(),
+  category: z.enum(CONTENT_CATEGORIES).optional(),
   ppv_price_minor_units: z.number().int().min(10).max(200).optional().nullable(),
   ppv_price_currency: z.enum(CURRENCY_CODES).optional().nullable(),
 });
@@ -39,6 +41,9 @@ const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
 export type Viewer = { id: string; role: string } | null;
 
 const AccessModeSchema = z.enum(['free', 'ppv', 'premium', 'premium_buyable']);
+const CategorySchema = z.enum(CONTENT_CATEGORIES);
+
+type VideoRow = typeof videos.$inferSelect;
 
 @Injectable()
 export class VideosService {
@@ -81,6 +86,7 @@ export class VideosService {
         title: dto.title,
         description: dto.description,
         accessMode: dto.access_mode,
+        category: dto.category ?? 'other',
         ppvPriceMinorUnits: dto.ppv_price_minor_units ? String(dto.ppv_price_minor_units) : null,
         ppvPriceCurrency: dto.ppv_price_currency ?? null,
         state: 'uploading',
@@ -279,6 +285,7 @@ export class VideosService {
         ...(dto.title !== undefined && { title: dto.title }),
         ...(dto.description !== undefined && { description: dto.description }),
         ...(dto.access_mode !== undefined && { accessMode: dto.access_mode }),
+        ...(dto.category !== undefined && { category: dto.category }),
         ...(dto.ppv_price_minor_units !== undefined && {
           ppvPriceMinorUnits: dto.ppv_price_minor_units ? String(dto.ppv_price_minor_units) : null,
         }),
@@ -310,34 +317,38 @@ export class VideosService {
   async findById(videoId: string, viewer: Viewer) {
     const video = await this.getVisible(videoId, viewer);
     const accessCheckResult = await this.access.checkAccess(await this.accessUser(viewer), video);
-
-    const creator = await this.db
-      .select({
-        id: schema_users.id,
-        handle: schema_users.handle,
-        displayName: schema_users.displayName,
-      })
-      .from(schema_users)
-      .where(eq(schema_users.id, video.ownerId))
-      .limit(1)
-      .then((rows) => rows[0]);
-
-    return {
-      ...(await this.serialize(video)),
-      creator: creator
-        ? { id: creator.id, handle: creator.handle, display_name: creator.displayName }
-        : null,
-      access_check_result: accessCheckResult,
-    };
+    const [item] = await this.withCreators([video]);
+    return { ...item!, access_check_result: accessCheckResult };
   }
 
-  private async serialize(v: typeof videos.$inferSelect) {
+  /**
+   * Videos by id, in the order given (watch history, collections, purchases). Unknown ids
+   * are skipped, and so are unpublished ones unless the caller has already established the
+   * viewer may see them (the owner, or a buyer whose purchase outlives unpublishing).
+   */
+  async listByIds(ids: string[], opts: { includeUnpublished?: boolean } = {}) {
+    if (ids.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(videos)
+      .where(
+        and(
+          inArray(videos.id, ids),
+          opts.includeUnpublished ? undefined : eq(videos.state, 'published'),
+        ),
+      );
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    return this.withCreators(ids.flatMap((id) => byId.get(id) ?? []));
+  }
+
+  private async serialize(v: VideoRow, viewCount = 0) {
     return {
       id: v.id,
       owner_id: v.ownerId,
       title: v.title,
       description: v.description,
       access_mode: v.accessMode,
+      category: v.category,
       ppv_price_minor_units: v.ppvPriceMinorUnits != null ? Number(v.ppvPriceMinorUnits) : null,
       ppv_price_currency: v.ppvPriceCurrency,
       in_premium_pool: v.inPremiumPool,
@@ -345,6 +356,7 @@ export class VideosService {
       duration_seconds: v.durationSeconds,
       thumbnail_key: v.thumbnailKey,
       thumbnail_url: await this.thumbnailUrl(v.thumbnailKey),
+      view_count: viewCount,
       published_at: v.publishedAt,
       created_at: v.createdAt,
       updated_at: v.updatedAt,
@@ -363,6 +375,8 @@ export class VideosService {
 
   async list(filters: {
     mode?: string;
+    category?: string;
+    excludeId?: string;
     creatorId?: string;
     q?: string;
     cursor?: string;
@@ -377,11 +391,18 @@ export class VideosService {
     if (mode && !mode.success) {
       throw new ValidationError('mode must be free, ppv, premium or premium_buyable');
     }
+    const category = filters.category ? CategorySchema.safeParse(filters.category) : undefined;
+    if (category && !category.success) throw new ValidationError('Unknown category');
 
     // Text search: ranked by relevance, one page (rank order has no stable cursor).
     const q = filters.q?.trim();
     if (q) {
-      const rows = await this.repo.searchPublished(q.slice(0, 200), mode?.data, limit);
+      const rows = await this.repo.searchPublished(
+        q.slice(0, 200),
+        mode?.data,
+        category?.data,
+        limit,
+      );
       return { items: await this.withCreators(rows), next_cursor: null };
     }
 
@@ -391,6 +412,8 @@ export class VideosService {
     }
 
     if (mode?.data) conditions.push(inArray(videos.accessMode, mode.data));
+    if (category?.data) conditions.push(eq(videos.category, category.data));
+    if (filters.excludeId) conditions.push(ne(videos.id, filters.excludeId));
     if (filters.creatorId) {
       conditions.push(eq(videos.ownerId, filters.creatorId));
     }
@@ -426,8 +449,9 @@ export class VideosService {
     return { items, next_cursor };
   }
 
-  private async withCreators(rows: (typeof videos.$inferSelect)[]) {
+  private async withCreators(rows: VideoRow[]) {
     const ownerIds = Array.from(new Set(rows.map((v) => v.ownerId)));
+    const views = await this.repo.viewCounts(rows.map((v) => v.id));
     const creators = ownerIds.length
       ? await this.db
           .select({
@@ -443,7 +467,7 @@ export class VideosService {
       rows.map(async (v) => {
         const c = byId.get(v.ownerId);
         return {
-          ...(await this.serialize(v)),
+          ...(await this.serialize(v, views.get(v.id) ?? 0)),
           creator: c ? { id: c.id, handle: c.handle, display_name: c.displayName } : null,
         };
       }),
@@ -580,6 +604,22 @@ export class VideosService {
       .limit(1);
     if (!video) throw new ResourceNotFoundError('Video');
     return video;
+  }
+
+  /** Videos the viewer has bought, most recent first. Unpublished ones stay (§6). */
+  async listPurchased(userId: string) {
+    const rows = await this.db
+      .select({ videoId: purchases.videoId, at: purchases.completedAt })
+      .from(purchases)
+      .where(and(eq(purchases.userId, userId), eq(purchases.state, 'completed')))
+      .orderBy(desc(purchases.completedAt))
+      .limit(100);
+    const items = await this.listByIds(
+      rows.map((r) => r.videoId),
+      { includeUnpublished: true },
+    );
+    const at = new Map(rows.map((r) => [r.videoId, r.at]));
+    return { items: items.map((v) => ({ ...v, purchased_at: at.get(v.id) ?? null })) };
   }
 
   async createPurchase(userId: string, body: unknown) {
