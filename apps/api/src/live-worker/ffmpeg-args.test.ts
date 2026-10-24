@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { liveLadderFor } from '@streamzw/shared';
 import { buildLiveArgs, copyRung, type LiveSource } from './ffmpeg-args';
-import { finalizePlaylist, playlistDuration, segmentNames } from './playlist';
+import { finalizePlaylist, fixMasterBandwidth, playlistDuration, segmentNames } from './playlist';
 
 const src4k: LiveSource = { width: 3840, height: 2160, codec: 'h264', fps: 30, hasAudio: true };
 
@@ -79,5 +79,20 @@ describe('replay playlists', () => {
     expect(finalizePlaylist(vod)).toBe(vod);
     expect(playlistDuration(event)).toBe(8);
     expect(segmentNames(event)).toEqual(['seg00000.ts', 'seg00001.ts']);
+  });
+});
+
+describe('master bandwidth', () => {
+  it('lifts a copied 4K rung above the encoded ones, never lowering real figures', () => {
+    const master = [
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=400400,RESOLUTION=426x240,CODECS="avc1.64000d,mp4a.40.2"',
+      '240p/index.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=176000,RESOLUTION=3840x2160,CODECS="avc1.640033,mp4a.40.2"',
+      '2160p/index.m3u8',
+    ].join('\n');
+    const out = fixMasterBandwidth(master, liveLadderFor(2160));
+    expect(out).toContain('BANDWIDTH=400400,RESOLUTION=426x240');
+    expect(out).toContain('BANDWIDTH=17760000,RESOLUTION=3840x2160');
   });
 });

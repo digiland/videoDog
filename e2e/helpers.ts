@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
-import { type Page, expect } from '@playwright/test';
+import { type Page, type Response, expect } from '@playwright/test';
 
 export const API = process.env.E2E_API_URL ?? 'http://localhost:3001';
 const API_LOG = process.env.E2E_API_LOG;
@@ -44,9 +44,16 @@ export async function signIn(page: Page, phone: { e164: string; local: string },
  * playable grant `{ url, kind }` or `{ access_denied, paywall }`.
  */
 export async function playlistVerdict(page: Page, videoId: string, open: () => Promise<unknown>) {
-  const [res] = await Promise.all([
-    page.waitForResponse((r) => r.url().includes(`/videos/${videoId}/playlist`) && r.ok()),
-    open(),
-  ]);
-  return (await res.json()) as { url?: string; kind?: string; access_denied?: boolean };
+  type Verdict = { url?: string; kind?: string; access_denied?: boolean };
+  const isPlaylist = (r: Response) => r.url().includes(`/videos/${videoId}/playlist`) && r.ok();
+  const [first] = await Promise.all([page.waitForResponse(isPlaylist), open()]);
+  // The page may re-check access (or re-render) and drop the first body; take the next one.
+  for (let res = first, attempt = 0; ; attempt++) {
+    try {
+      return (await res.json()) as Verdict;
+    } catch (err) {
+      if (attempt >= 2) throw err;
+      res = await page.waitForResponse(isPlaylist);
+    }
+  }
 }

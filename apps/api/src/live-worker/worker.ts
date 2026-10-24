@@ -19,11 +19,11 @@ import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import pino from 'pino';
-import { liveLadderFor, streamIdFromPath, thumbnailKey } from '@streamzw/shared';
+import { LIVE_LADDER, liveLadderFor, streamIdFromPath, thumbnailKey } from '@streamzw/shared';
 import { StorageService } from '../storage/storage.service';
 import { listFiles } from '../workers/transcode';
 import { buildLiveArgs, type LiveEncoder, type LiveSource } from './ffmpeg-args';
-import { finalizePlaylist, playlistDuration } from './playlist';
+import { finalizePlaylist, fixMasterBandwidth, playlistDuration } from './playlist';
 
 const log = pino({ base: { service: 'live-worker' } });
 
@@ -136,6 +136,9 @@ async function ingestSession(mtxPath: string) {
   const ladder = liveLadderFor(source.height);
   const outDir = path.join(HLS_DIR, id);
   for (const r of ladder) fs.mkdirSync(path.join(outDir, `${r.height}p`), { recursive: true });
+  // A reconnect leaves the previous master behind; wait for this session's own.
+  const masterFile = path.join(outDir, 'master.m3u8');
+  fs.rmSync(masterFile, { force: true });
   log.info({ id, source, ladder: ladder.map((r) => r.height), encoder: ENCODER }, 'ingest');
 
   const ffmpeg = spawn(
@@ -160,7 +163,12 @@ async function ingestSession(mtxPath: string) {
 
   // Viewers only get a URL once there is something to play.
   const top = path.join(outDir, `${ladder[ladder.length - 1]!.height}p`, 'index.m3u8');
-  if (await waitForFile(top, 45_000, () => running)) {
+  if (
+    (await waitForFile(top, 45_000, () => running)) &&
+    (await waitForFile(masterFile, 15_000, () => running))
+  ) {
+    // Before anyone gets a URL: advertise the copied rendition's real bitrate.
+    patchMaster(masterFile, ladder);
     await api('POST', `${streamApi(id)}/events`, {
       event: 'started',
       width: source.width,
@@ -169,9 +177,13 @@ async function ingestSession(mtxPath: string) {
       codec: source.codec,
     });
     log.info({ id }, 'on air');
+    void uploadPoster(id, status.video_id, outDir, ladder[0]!.height).catch((err: unknown) =>
+      log.warn({ id, err }, 'no poster'),
+    );
   }
 
   const heartbeat = setInterval(() => {
+    patchMaster(masterFile, ladder); // ffmpeg may rewrite it (e.g. once all renditions start)
     void api<Status>('POST', `${streamApi(id)}/events`, { event: 'alive' })
       .then((s) => {
         if (s.state !== 'live') {
@@ -189,6 +201,40 @@ async function ingestSession(mtxPath: string) {
     log.error({ id, err }, 'could not report disconnect'),
   );
   spawnFinalizer(id);
+}
+
+/** A frame of the feed as the stream's thumbnail, so live cards aren't blank. */
+async function uploadPoster(id: string, videoId: string, outDir: string, height: number) {
+  const thumb = path.join(outDir, 'poster.jpg');
+  const r = spawnSync('ffmpeg', [
+    '-hide_banner',
+    '-loglevel',
+    'error',
+    '-y',
+    '-i',
+    path.join(outDir, `${height}p`, 'index.m3u8'),
+    '-frames:v',
+    '1',
+    '-q:v',
+    '3',
+    thumb,
+  ]);
+  if (r.status !== 0 || !fs.existsSync(thumb)) throw new Error(r.stderr?.toString());
+  const storage = new StorageService();
+  await storage.uploadFile(storage.thumbBucketName, thumbnailKey(videoId), thumb, 'image/jpeg');
+  fs.rmSync(thumb, { force: true });
+  await api('POST', `${streamApi(id)}/events`, { event: 'poster' });
+}
+
+/** Correct the copied rung's advertised bitrate in place (no-op when already right). */
+function patchMaster(file: string, ladder: Parameters<typeof fixMasterBandwidth>[1]) {
+  try {
+    const before = fs.readFileSync(file, 'utf8');
+    const after = fixMasterBandwidth(before, ladder);
+    if (after !== before) fs.writeFileSync(file, after);
+  } catch {
+    // not written yet
+  }
 }
 
 /** Only one finalizer per stream on this box. */
@@ -267,6 +313,14 @@ export async function uploadRecording(
   storage = new StorageService(),
 ) {
   let duration = 0;
+  const heights = fs
+    .readdirSync(dir)
+    .filter((n) => /^\d+p$/.test(n))
+    .map((n) => parseInt(n, 10));
+  patchMaster(
+    path.join(dir, 'master.m3u8'),
+    LIVE_LADDER.filter((r) => heights.includes(r.height)),
+  );
   for (const name of fs.readdirSync(dir)) {
     const playlist = path.join(dir, name, 'index.m3u8');
     if (!fs.existsSync(playlist)) continue;

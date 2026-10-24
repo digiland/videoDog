@@ -25,26 +25,27 @@ Multi-currency from day one — USD canonical; ZWG + ZAR first-class; EUR/GBP la
 
 Settled. Do not propose alternatives without approval.
 
-| Layer         | Choice                                                |
-| ------------- | ----------------------------------------------------- |
-| Backend       | NestJS 11 (modular monolith)                          |
-| Web           | Next.js 15 App Router (viewer + studio)               |
-| Mobile        | Flutter 3.27+ (offline-first)                         |
-| DB            | PostgreSQL 16                                         |
-| Cache + queue | Redis 7 + BullMQ 5                                    |
-| Storage       | MinIO (S3-compatible)                                 |
-| CDN           | BunnyCDN (HLS, signed URLs)                           |
-| Transcoder    | FFmpeg 7 (worker containers)                          |
-| Auth          | Phone + OTP — WhatsApp Business primary, SMS fallback |
-| Payments      | EcoCash (USD + ZWG separate), ZIPIT, Paystack         |
-| Search        | Postgres `tsvector` (Meilisearch in phase 2)          |
-| ORM           | Drizzle (SQL-first migrations)                        |
-| Monorepo      | pnpm 9 workspaces + turbo                             |
-| Runtime       | Node 22 LTS                                           |
-| Containers    | docker-compose (k8s post-MVP)                         |
-| CI            | GitHub Actions                                        |
-| Lint/format   | ESLint + Prettier + Biome (web)                       |
-| Tests         | Vitest (api, web) + Flutter test                      |
+| Layer         | Choice                                                                                                                   |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Backend       | NestJS 11 (modular monolith)                                                                                             |
+| Web           | Next.js 15 App Router (viewer + studio)                                                                                  |
+| Mobile        | Flutter 3.27+ (offline-first)                                                                                            |
+| DB            | PostgreSQL 16                                                                                                            |
+| Cache + queue | Redis 7 + BullMQ 5                                                                                                       |
+| Storage       | MinIO (S3-compatible)                                                                                                    |
+| CDN           | BunnyCDN (HLS, signed URLs)                                                                                              |
+| Transcoder    | FFmpeg 7 (worker containers)                                                                                             |
+| Live ingest   | MediaMTX (RTMP + SRT) on a separate live server; FFmpeg ladder up to 2160p, NVENC optional (approved by Adrian, 2026-10) |
+| Auth          | Phone + OTP — WhatsApp Business primary, SMS fallback                                                                    |
+| Payments      | EcoCash (USD + ZWG separate), ZIPIT, Paystack                                                                            |
+| Search        | Postgres `tsvector` (Meilisearch in phase 2)                                                                             |
+| ORM           | Drizzle (SQL-first migrations)                                                                                           |
+| Monorepo      | pnpm 9 workspaces + turbo                                                                                                |
+| Runtime       | Node 22 LTS                                                                                                              |
+| Containers    | docker-compose (k8s post-MVP)                                                                                            |
+| CI            | GitHub Actions                                                                                                           |
+| Lint/format   | ESLint + Prettier + Biome (web)                                                                                          |
+| Tests         | Vitest (api, web) + Flutter test                                                                                         |
 
 ---
 
@@ -164,6 +165,8 @@ async checkAccess(user: User | null, video: Video): Promise<AccessResult> {
   };
 }
 ```
+
+**Live streams** are backed by a `videos` row (access mode, price, category). `checkAccess` runs on that video like any other, so pre-buying an upcoming stream, Premium access and the premium pool work unchanged; the recording becomes the same video's HLS replay.
 
 `in_premium_pool` is a generated column: `access_mode IN ('premium','premium_buyable')`.
 
@@ -480,6 +483,25 @@ CREATE TABLE collection_items (
   ...,
   UNIQUE (collection_id, video_id)
 );
+
+-- LIVE (full DDL in infra/migrations/0017_live_streams.sql)
+CREATE TYPE live_state AS ENUM ('scheduled','live','ended','cancelled');
+CREATE TYPE recording_state AS ENUM ('none','pending','ready','failed');
+
+CREATE TABLE live_streams (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  video_id uuid NOT NULL UNIQUE,                      -- FK (video_id, owner_id) → videos: access lives there
+  owner_id uuid NOT NULL,
+  state live_state NOT NULL DEFAULT 'scheduled',
+  stream_key_hash text NOT NULL,                      -- sha256; key shown once
+  scheduled_at timestamptz, started_at timestamptz, ended_at timestamptz,
+  record boolean NOT NULL DEFAULT true,
+  recording_state recording_state NOT NULL DEFAULT 'none',
+  ingest_connected boolean NOT NULL DEFAULT false,
+  last_ingest_at timestamptz,
+  source_width int, source_height int, source_fps int, source_codec text,
+  ...
+);
 ```
 
 ---
@@ -488,20 +510,21 @@ CREATE TABLE collection_items (
 
 Layout per module: `<name>.{module,controller,service,repository,spec}.ts` + `dto/` (Zod schemas re-exported from `@streamzw/shared`). Drizzle queries in services; raw SQL allowed only in `*.repository.ts`.
 
-| Module          | Endpoints                                                                                                                                                                                                                                                                                           |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `auth`          | `POST /auth/otp/{request,verify}`, `POST /auth/refresh`, `POST /auth/logout`. Guards: `JwtGuard`, `RolesGuard('creator'\|'admin')`.                                                                                                                                                                 |
-| `users`         | `GET/PATCH /users/me`, `POST /users/me/become-creator` (requires `phone_verified`, locks `canonical_pricing_currency`), `POST /users/me/kyc/id`.                                                                                                                                                    |
-| `videos`        | `POST /videos` (presigned multipart upload), `POST /videos/:id/complete-upload`, `PATCH /videos/:id`, `POST /videos/:id/publish`, `GET /videos[/:id]`, `GET /videos/:id/playlist` (signed HLS URL if `checkAccess` allows).                                                                         |
-| `subscriptions` | `GET /subscriptions/plans` (priced in display currency), `POST /subscriptions`, `GET /subscriptions/me`, `POST /subscriptions/me/cancel`.                                                                                                                                                           |
-| `payments`      | `POST /payments`, `POST /webhooks/{ecocash,zipit,paystack}` (idempotent).                                                                                                                                                                                                                           |
-| `wallet`        | `GET /wallet/balance`, `GET /wallet/ledger`, `POST /wallet/payout`.                                                                                                                                                                                                                                 |
-| `watch`         | `POST /watch/sessions`, `POST /watch/sessions/:id/{heartbeat,end}`, `GET /watch/history`. A view = a session past 2 counted heartbeats (~30s), creator's own excluded.                                                                                                                              |
-| `collections`   | Courses (with sections) and playlists of a creator's own videos. `GET /collections[?creator=&category=&kind=&video=&q=]`, `GET /collections/:id`, creator CRUD + `/sections`, `/items`, `PUT /collections/:id/layout`, `/publish`. Grouping only: no price; each video keeps its own `checkAccess`. |
-| `channels`      | `GET /channels/:handleOrId`, `GET /channels?q=` (public creator profiles; part of `users`).                                                                                                                                                                                                         |
-| `search`        | `GET /search?q=&mode=&category=` (Postgres FTS).                                                                                                                                                                                                                                                    |
-| `fx`            | `GET /fx/rates`, cron `fx.refresh` (06:00 CAT daily), `POST /admin/fx/override`.                                                                                                                                                                                                                    |
-| `notifications` | Internal — WhatsApp → SMS → push. Events: payment_completed, subscription_renewing, payout_processed, new_video_from_followed.                                                                                                                                                                      |
+| Module          | Endpoints                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auth`          | `POST /auth/otp/{request,verify}`, `POST /auth/refresh`, `POST /auth/logout`. Guards: `JwtGuard`, `RolesGuard('creator'\|'admin')`.                                                                                                                                                                                                                                                         |
+| `users`         | `GET/PATCH /users/me`, `POST /users/me/become-creator` (requires `phone_verified`, locks `canonical_pricing_currency`), `POST /users/me/kyc/id`.                                                                                                                                                                                                                                            |
+| `videos`        | `POST /videos` (presigned multipart upload), `POST /videos/:id/complete-upload`, `PATCH /videos/:id`, `POST /videos/:id/publish`, `GET /videos[/:id]`, `GET /videos/:id/playlist` (signed HLS URL if `checkAccess` allows).                                                                                                                                                                 |
+| `subscriptions` | `GET /subscriptions/plans` (priced in display currency), `POST /subscriptions`, `GET /subscriptions/me`, `POST /subscriptions/me/cancel`.                                                                                                                                                                                                                                                   |
+| `payments`      | `POST /payments`, `POST /webhooks/{ecocash,zipit,paystack}` (idempotent).                                                                                                                                                                                                                                                                                                                   |
+| `wallet`        | `GET /wallet/balance`, `GET /wallet/ledger`, `POST /wallet/payout`.                                                                                                                                                                                                                                                                                                                         |
+| `watch`         | `POST /watch/sessions`, `POST /watch/sessions/:id/{heartbeat,end}`, `GET /watch/history`. A view = a session past 2 counted heartbeats (~30s), creator's own excluded.                                                                                                                                                                                                                      |
+| `collections`   | Courses (with sections) and playlists of a creator's own videos. `GET /collections[?creator=&category=&kind=&video=&q=]`, `GET /collections/:id`, creator CRUD + `/sections`, `/items`, `PUT /collections/:id/layout`, `/publish`. Grouping only: no price; each video keeps its own `checkAccess`.                                                                                         |
+| `channels`      | `GET /channels/:handleOrId`, `GET /channels?q=` (public creator profiles; part of `users`).                                                                                                                                                                                                                                                                                                 |
+| `live`          | `GET /live?state=live\|upcoming`; creator `POST /live/streams`, `GET /live/streams/{mine,:id}`, `PATCH`, `/key`, `/cancel`, `/end`. Live-server hooks (shared secret): `POST /live/ingest/auth` (MediaMTX), `/live/ingest/streams/:id/{events,recording/claim,recording}`. Minute sweep ends streams whose ingest is gone 5 min. Live playback grants come from `GET /videos/:id/playlist`. |
+| `search`        | `GET /search?q=&mode=&category=` (Postgres FTS).                                                                                                                                                                                                                                                                                                                                            |
+| `fx`            | `GET /fx/rates`, cron `fx.refresh` (06:00 CAT daily), `POST /admin/fx/override`.                                                                                                                                                                                                                                                                                                            |
+| `notifications` | Internal — WhatsApp → SMS → push. Events: payment_completed, subscription_renewing, payout_processed, new_video_from_followed.                                                                                                                                                                                                                                                              |
 
 ---
 
@@ -538,19 +561,20 @@ Env vars are documented in `.env.example`.
 
 Ship sequentially; do not skip ahead.
 
-| #   | Goal                                                                                                           |
-| --- | -------------------------------------------------------------------------------------------------------------- |
-| M1  | Scaffold — monorepo, `/health`, Drizzle, CI. **Done.**                                                         |
-| M2  | Auth — phone+OTP, JWT issue + rotate, `/users/me`.                                                             |
-| M3  | Video lifecycle — presigned upload, FFmpeg transcode worker (240/480/720p HLS), publish.                       |
-| M4  | Catalog + playback — list/search/play `free`, BunnyCDN signed URLs, thumbnails.                                |
-| M5  | Access engine + paywall — `checkAccess` covers 16 (mode × auth × subbed × purchased) combos; admin fake-grant. |
-| M6  | Payments + wallet — EcoCash USD/ZWG sandbox, idempotent webhooks, double-entry ledger.                         |
-| M7  | FX provider — `fx_rates`, RBZ scraper + OXR, daily cron, admin override, `fx_holding` flow.                    |
-| M8  | Subscriptions — plans/quote/checkout, auto-renew cron 02:00 CAT, 3-day grace.                                  |
-| M9  | Creator studio — earnings dashboard, payout flow + min thresholds, video mgmt, analytics.                      |
-| M10 | Premium pool payouts — monthly cron 01:00 CAT, bigint-safe proportional, idempotent.                           |
-| M11 | Mobile parity — Flutter viewer: browse/search/play/paywall/EcoCash deep link/offline DLs/push.                 |
+| #   | Goal                                                                                                                                                            |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| M1  | Scaffold — monorepo, `/health`, Drizzle, CI. **Done.**                                                                                                          |
+| M2  | Auth — phone+OTP, JWT issue + rotate, `/users/me`.                                                                                                              |
+| M3  | Video lifecycle — presigned upload, FFmpeg transcode worker (240/480/720p HLS), publish.                                                                        |
+| M4  | Catalog + playback — list/search/play `free`, BunnyCDN signed URLs, thumbnails.                                                                                 |
+| M5  | Access engine + paywall — `checkAccess` covers 16 (mode × auth × subbed × purchased) combos; admin fake-grant.                                                  |
+| M6  | Payments + wallet — EcoCash USD/ZWG sandbox, idempotent webhooks, double-entry ledger.                                                                          |
+| M7  | FX provider — `fx_rates`, RBZ scraper + OXR, daily cron, admin override, `fx_holding` flow.                                                                     |
+| M8  | Subscriptions — plans/quote/checkout, auto-renew cron 02:00 CAT, 3-day grace.                                                                                   |
+| M9  | Creator studio — earnings dashboard, payout flow + min thresholds, video mgmt, analytics.                                                                       |
+| M10 | Premium pool payouts — monthly cron 01:00 CAT, bigint-safe proportional, idempotent.                                                                            |
+| M11 | Mobile parity — Flutter viewer: browse/search/play/paywall/EcoCash deep link/offline DLs/push.                                                                  |
+| M12 | Live — MediaMTX ingest, ABR ladder to 4K, signed live HLS via BunnyCDN, pre-buy, replays. **Backbone built**; needs a production live server and CDN load test. |
 
 ---
 
@@ -558,7 +582,6 @@ Ship sequentially; do not skip ahead.
 
 Do not implement without confirming with Adrian:
 
-- Live streaming
 - DRM beyond signed URLs
 - Recommendations ML
 - Comments / social

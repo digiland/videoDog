@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { liveLadderFor, resolutionLabel, streamIdFromPath } from './live';
+import { liveLadderFor, resolutionLabel, streamIdFromPath } from './live.js';
 
 describe('live ladder', () => {
   it('keeps every rung up to 4K for a 4K source, phone renditions included', () => {

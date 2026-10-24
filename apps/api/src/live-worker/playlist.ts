@@ -32,3 +32,29 @@ export function segmentNames(text: string): string[] {
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'));
 }
+
+/**
+ * ffmpeg can't know the bitrate of a copied (passthrough) rendition, so the master playlist
+ * advertises it at the audio bitrate alone — and players would pick 4K as the *cheapest*
+ * option. Rewrite each variant's BANDWIDTH to at least the ladder's budget for its height.
+ */
+export function fixMasterBandwidth(
+  master: string,
+  ladder: readonly { height: number; videoKbps: number; audioKbps: number }[],
+): string {
+  const lines = master.split('\n');
+  for (let i = 0; i < lines.length - 1; i++) {
+    const inf = lines[i]!;
+    if (!inf.startsWith('#EXT-X-STREAM-INF:')) continue;
+    const m = /^(\d{3,4})p\//.exec(lines[i + 1]!.trim());
+    const rung = m ? ladder.find((r) => r.height === Number(m[1])) : undefined;
+    if (!rung) continue;
+    // Peak budget: maxrate is 1.1× the target bitrate in the encoded renditions.
+    const budget = Math.round((rung.videoKbps * 1.1 + rung.audioKbps) * 1000);
+    lines[i] = inf.replace(
+      /BANDWIDTH=(\d+)/,
+      (_, bw: string) => `BANDWIDTH=${Math.max(Number(bw), budget)}`,
+    );
+  }
+  return lines.join('\n');
+}

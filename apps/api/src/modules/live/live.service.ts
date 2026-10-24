@@ -53,6 +53,8 @@ const IngestEventSchema = z.discriminatedUnion('event', [
     codec: z.string().max(40).optional(),
   }),
   z.object({ event: z.literal('alive') }),
+  // The worker uploaded a frame of the feed to thumbs/<video_id>.jpg.
+  z.object({ event: z.literal('poster') }),
   z.object({ event: z.literal('disconnected') }),
 ]);
 
@@ -272,6 +274,12 @@ export class LiveService {
           updatedAt: now,
         })
         .where(eq(liveStreams.id, id));
+    } else if (e.event === 'poster') {
+      // Only fill a missing thumbnail; never replace one the creator chose.
+      await this.db
+        .update(videos)
+        .set({ thumbnailKey: thumbnailKey(s.videoId), updatedAt: now })
+        .where(and(eq(videos.id, s.videoId), isNull(videos.thumbnailKey)));
     } else if (e.event === 'alive') {
       if (s.state === 'live') {
         await this.db

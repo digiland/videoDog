@@ -156,3 +156,56 @@ These are the known gaps, from `docs/REVIEW.md`. Each needs a decision or a part
 - **BunnyCDN and Paystack** follow their documented APIs but are untested against live accounts.
 - **Load**: run a load test of `/videos`, playback grants and heartbeats on the production
   server size before a launch campaign.
+
+## 12. Live server (infra/live)
+
+Live runs on its **own box** so a 4K event never starves the API or VOD transcoding.
+Creators publish RTMP or SRT to MediaMTX; the live worker turns the feed into an HLS ladder
+(source copied when it is H.264, plus 2160/1440/1080/720/480/240p down to the source
+height); nginx serves it with per-stream tokens; replays upload to the main MinIO.
+
+```
+OBS ──RTMP/SRT──▶ MediaMTX ──auth──▶ api /live/ingest/auth
+                     │ runOnReady
+                     ▼
+              live worker (ffmpeg ladder) ──events──▶ api /live/ingest/streams/:id/*
+                     │ HLS on disk                     ▲
+                     ▼                                 │ grant (signed URL)
+      nginx secure_link origin ◀── BunnyCDN pull zone ◀── viewers' players
+                     │ on end: recording → MinIO (media.DOMAIN) → replay
+```
+
+**Sizing.** CPU encoding (libx264) needs roughly 4 cores per 1080p ladder; a 4K source with
+the full ladder needs 16+ fast cores **or** an NVIDIA GPU (one modern card runs several 4K
+ladders: set `LIVE_ENCODER=h264_nvenc` and uncomment the `deploy` block). Disk: a 4K event
+writes about 13 GB/hour until its replay uploads. Upload bandwidth from the box only matters
+for the CDN's first fetch of each segment.
+
+**Viewers at scale go through BunnyCDN.** One origin can't serve thousands of 4K viewers
+(25+ Mbps each). Create a pull zone with origin `https://LIVE_DOMAIN`, leave token
+authentication **off** at Bunny (nginx checks tokens; the hourly shared expiry makes URLs
+cacheable), and set `LIVE_PUBLIC_BASE` on the main stack to the pull zone URL. Playlists
+are cached for 1 s, segments for a day.
+
+**Setup.**
+
+```bash
+cp infra/live/.env.live.example infra/live/.env.live   # same LIVE_* secrets as the main stack
+L="docker compose --env-file infra/live/.env.live -f infra/live/docker-compose.live.yml"
+$L build
+ENV_FILE=infra/live/.env.live COMPOSE_FILE=infra/live/docker-compose.live.yml \
+  DOMAIN_VAR=LIVE_DOMAIN HOSTS=single bash infra/scripts/init-letsencrypt.sh ops@yourdomain
+$L up -d
+```
+
+Firewall: 80, 443, 1935/tcp (RTMP), 8890/udp (SRT). On the main stack set `LIVE_DOMAIN`,
+`LIVE_PUBLIC_BASE`, `LIVE_INGEST_SECRET` and `LIVE_SIGNING_SECRET` and redeploy the API.
+
+**Check it end to end** before the first event: create a stream in `/studio/live`, publish a
+test feed (OBS, or `ffmpeg -re -f lavfi -i testsrc2=size=3840x2160:rate=30 -f lavfi -i sine
+-c:v libx264 -g 60 -c:a aac -f flv "rtmp://LIVE_DOMAIN/live/<id>?user=key&pass=<key>"`),
+watch the control room show the feed, open the viewer page on a phone, then End stream and
+confirm the replay appears within a few minutes.
+
+**What creators should send:** H.264, keyframe every 2 s, CBR; 4K at 20–35 Mbps, 1080p at
+6 Mbps. On mobile uplinks, SRT recovers from packet loss better than RTMP.
