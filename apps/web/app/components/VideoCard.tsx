@@ -3,6 +3,7 @@ import { formatDuration, formatViews, timeAgo } from '../../src/lib/format';
 import type { Video } from '../../src/types/api';
 import { AccessChip } from '../../src/ui/access-chip';
 import { Avatar, channelHref, creatorLabel } from '../../src/ui/avatar';
+import { LiveBadge, liveStatus } from '../../src/ui/live-badge';
 
 export function creatorName(video: Pick<Video, 'creator'>): string {
   return creatorLabel(video.creator);
@@ -21,7 +22,10 @@ export function videoHref(video: Pick<Video, 'id'>, listId?: string | null): str
 
 /** "1.2K views · 3 days ago" — the parts we know. */
 export function videoStats(video: Video): string {
+  const status = liveStatus(video.live);
+  if (status && video.live?.state !== 'ended') return status;
   const parts: string[] = [];
+  if (status) parts.push(status);
   if (video.view_count) parts.push(formatViews(video.view_count));
   if (video.published_at) parts.push(timeAgo(video.published_at));
   return parts.join(' · ');
@@ -56,10 +60,16 @@ export function Thumbnail({
           <span className="text-3xl font-bold text-ink-3">{initial}</span>
         </div>
       )}
-      {video.duration_seconds != null && (
-        <span className="absolute bottom-1.5 right-1.5 rounded bg-scrim px-1.5 text-xs font-semibold leading-5 text-ink num">
-          {formatDuration(video.duration_seconds)}
+      {video.live && (video.live.state === 'live' || video.live.state === 'scheduled') ? (
+        <span className="absolute bottom-1.5 right-1.5">
+          <LiveBadge live={video.live} />
         </span>
+      ) : (
+        video.duration_seconds != null && (
+          <span className="absolute bottom-1.5 right-1.5 rounded bg-scrim px-1.5 text-xs font-semibold leading-5 text-ink num">
+            {formatDuration(video.duration_seconds)}
+          </span>
+        )
       )}
     </div>
   );

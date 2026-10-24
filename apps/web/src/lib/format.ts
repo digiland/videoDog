@@ -68,3 +68,21 @@ export function formatRunningTime(seconds: number): string {
   const m = mins % 60;
   return m ? `${h} h ${m} min` : `${h} h`;
 }
+
+/** "Today 18:00", "Tomorrow 09:30" or "Sat 2 Nov, 18:00" (Harare time) for a start time. */
+export function startsAt(iso: string, now: Date = new Date()): string {
+  const d = new Date(iso);
+  const tz = 'Africa/Harare';
+  const day = (x: Date) => x.toLocaleDateString('en-GB', { timeZone: tz });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: tz });
+  const tomorrow = new Date(now.getTime() + 86_400_000);
+  if (day(d) === day(now)) return `Today ${time}`;
+  if (day(d) === day(tomorrow)) return `Tomorrow ${time}`;
+  const date = d.toLocaleDateString('en-GB', {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: tz,
+  });
+  return `${date}, ${time}`;
+}

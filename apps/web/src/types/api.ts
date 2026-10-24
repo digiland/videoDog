@@ -23,6 +23,42 @@ export interface CreatorRef {
   handle: string | null;
 }
 
+export interface LiveInfo {
+  id: string;
+  state: 'scheduled' | 'live' | 'ended' | 'cancelled';
+  scheduled_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  source_height: number | null;
+  replay: boolean;
+}
+
+/** A creator's own stream, from /live/streams/*. */
+export interface LiveStream {
+  id: string;
+  video_id: string;
+  state: LiveInfo['state'];
+  scheduled_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  record: boolean;
+  recording_state: 'none' | 'pending' | 'ready' | 'failed';
+  ingest: {
+    connected: boolean;
+    last_seen_at: string | null;
+    width: number | null;
+    height: number | null;
+    fps: number | null;
+    codec: string | null;
+    rtmp_url: string;
+    rtmp_stream_name: string;
+    srt_url: string;
+  };
+  video: Video | null;
+  /** Only in the response that created the stream or reset its key. */
+  stream_key?: string;
+}
+
 export interface Channel {
   id: string;
   handle: string | null;
@@ -89,6 +125,8 @@ export interface Video {
   published_at: string | null;
   created_at: string;
   creator?: CreatorRef | null;
+  /** Set when the video is (or was) a live stream. */
+  live?: LiveInfo | null;
   /** Watch history / purchases only. */
   watched_at?: string | null;
   purchased_at?: string | null;
@@ -164,6 +202,14 @@ export interface PlayablePlaylist {
   kind: 'hls' | 'progressive';
   expires_at: string;
   captions: CaptionTrack[];
+  /** A live stream on air (the URL is the live origin). */
+  live?: boolean;
+}
+
+/** A live stream the viewer may watch that hasn't started yet. */
+export interface PlaylistUpcoming {
+  upcoming: true;
+  scheduled_at: string | null;
 }
 
 export interface PlaylistDenied {
@@ -171,7 +217,7 @@ export interface PlaylistDenied {
   paywall: PaywallPayload;
 }
 
-export type PlaylistResponse = PlayablePlaylist | PlaylistDenied;
+export type PlaylistResponse = PlayablePlaylist | PlaylistDenied | PlaylistUpcoming;
 
 export type PaymentCurrencyCode = 'USD' | 'ZWG' | 'ZAR';
 

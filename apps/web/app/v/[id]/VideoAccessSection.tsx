@@ -10,6 +10,7 @@ import type {
 } from '../../../src/types/api';
 import { LinkButton } from '../../../src/ui/button';
 import { Icon } from '../../../src/ui/icon';
+import { startsAt } from '../../../src/lib/format';
 import Paywall from '../../components/Paywall';
 import VideoMeta from './VideoMeta';
 
@@ -23,6 +24,8 @@ type AccessState =
   | { status: 'loading' }
   | { status: 'playable'; playlist: PlayablePlaylist }
   | { status: 'denied'; paywall: PaywallPayload }
+  | { status: 'upcoming'; scheduledAt: string | null }
+  | { status: 'processing' }
   | { status: 'unavailable' };
 
 interface Props {
@@ -38,6 +41,17 @@ function isDenied(
   res: PlaylistResponse,
 ): res is Extract<PlaylistResponse, { access_denied: true }> {
   return 'access_denied' in res && res.access_denied === true;
+}
+
+function isUpcoming(res: PlaylistResponse): res is Extract<PlaylistResponse, { upcoming: true }> {
+  return 'upcoming' in res && res.upcoming === true;
+}
+
+/** Map a playlist response to what the stage shows. */
+function stateOf(res: PlaylistResponse): AccessState {
+  if (isDenied(res)) return { status: 'denied', paywall: res.paywall };
+  if (isUpcoming(res)) return { status: 'upcoming', scheduledAt: res.scheduled_at };
+  return { status: 'playable', playlist: res };
 }
 
 function Pending() {
@@ -97,16 +111,19 @@ export default function VideoAccessSection({
 
   const checkAccess = useCallback(async () => {
     try {
-      const res = await fetchPlaylist();
-      setState(
-        isDenied(res)
-          ? { status: 'denied', paywall: res.paywall }
-          : { status: 'playable', playlist: res },
-      );
-    } catch {
-      setState({ status: 'unavailable' });
+      setState(stateOf(await fetchPlaylist()));
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      setState(code === 'REPLAY_PROCESSING' ? { status: 'processing' } : { status: 'unavailable' });
     }
   }, [fetchPlaylist]);
+
+  // Upcoming live stream: check every 20s, so the player appears when the creator goes live.
+  useEffect(() => {
+    if (state.status !== 'upcoming' && state.status !== 'processing') return;
+    const t = setInterval(() => void checkAccess(), state.status === 'upcoming' ? 20_000 : 60_000);
+    return () => clearInterval(t);
+  }, [state.status, checkAccess]);
 
   // Initial load. When the server couldn't render metadata anonymously, fetch it with auth.
   useEffect(() => {
@@ -148,13 +165,8 @@ export default function VideoAccessSection({
   // Signed playlist URL expired mid-session: fetch a fresh one (Player resumes position).
   const handlePlaylistExpired = useCallback(async (): Promise<boolean> => {
     try {
-      const res = await fetchPlaylist();
-      if (isDenied(res)) {
-        // Access lapsed (e.g. day pass expired) — show the paywall instead.
-        setState({ status: 'denied', paywall: res.paywall });
-        return true;
-      }
-      setState({ status: 'playable', playlist: res });
+      // Access may have lapsed (e.g. day pass expired): stateOf shows the paywall then.
+      setState(stateOf(await fetchPlaylist()));
       return true;
     } catch {
       return false;
@@ -167,6 +179,12 @@ export default function VideoAccessSection({
     <>
       {state.status === 'playable' ? (
         <div className="relative aspect-video overflow-hidden bg-surface md:rounded-xl">
+          {state.playlist.live && (
+            <span className="pointer-events-none absolute left-2 top-2 z-10 inline-flex items-center gap-1 rounded bg-danger px-2 text-xs font-bold leading-6 text-bg">
+              <Icon name="live" size={14} />
+              LIVE
+            </span>
+          )}
           <Player
             videoId={videoId}
             src={state.playlist.url}
@@ -199,6 +217,25 @@ export default function VideoAccessSection({
         <Stage thumbnailUrl={thumbnailUrl}>
           {state.status === 'loading' ? (
             <Pending />
+          ) : state.status === 'upcoming' ? (
+            <div className="flex w-full flex-col items-center justify-center gap-2 bg-scrim p-4 text-center">
+              <Icon name="live" size={28} className="text-accent" />
+              <p className="text-lg font-bold text-ink">
+                {state.scheduledAt ? `Starts ${startsAt(state.scheduledAt)}` : 'Starting soon'}
+              </p>
+              <p className="max-w-sm text-sm text-ink-2">
+                You&apos;re all set. The stream plays here as soon as it goes live; keep this page
+                open.
+              </p>
+            </div>
+          ) : state.status === 'processing' ? (
+            <div className="flex w-full flex-col items-center justify-center gap-2 bg-scrim p-4 text-center">
+              <Icon name="spinner" size={24} className="text-ink-2" />
+              <p className="text-base font-semibold text-ink">The replay is being prepared</p>
+              <p className="max-w-sm text-sm text-ink-2">
+                This stream just ended. Its recording will be ready to watch in a few minutes.
+              </p>
+            </div>
           ) : state.status === 'denied' ? (
             <div className="flex w-full items-center justify-center bg-scrim">
               <Paywall payload={state.paywall} videoId={videoId} />

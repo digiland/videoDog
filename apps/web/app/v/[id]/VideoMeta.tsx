@@ -8,6 +8,8 @@ import { DataCost } from '../../../src/ui/data-cost';
 import { creatorName, videoPrice } from '../../components/VideoCard';
 import Description from '../../components/viewer/Description';
 import ShareButton from './ShareButton';
+import { LiveBadge, liveStatus } from '../../../src/ui/live-badge';
+import { resolutionLabel } from '@streamzw/shared';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-GB', {
@@ -62,6 +64,17 @@ export default function VideoMeta({ video, channel }: { video: Video; channel?: 
         <ShareButton title={video.title} />
       </div>
       <div className="flex flex-col gap-2 rounded-xl bg-surface p-3">
+        {video.live && (video.live.state === 'live' || video.live.state === 'scheduled') && (
+          <p className="flex flex-wrap items-center gap-2 text-sm font-semibold text-ink">
+            <LiveBadge live={video.live} />
+            <span>{liveStatus(video.live)}</span>
+            {video.live.state === 'live' && video.live.source_height && (
+              <span className="text-ink-3">
+                · up to {resolutionLabel(video.live.source_height)}
+              </span>
+            )}
+          </p>
+        )}
         <p className="flex flex-wrap items-center gap-x-2 text-sm font-semibold text-ink num">
           {video.view_count ? <span>{formatViews(video.view_count)}</span> : null}
           {video.published_at && (

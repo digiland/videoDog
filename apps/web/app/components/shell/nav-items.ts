@@ -36,10 +36,20 @@ export const STUDIO: NavItem = {
   href: '/studio',
   label: 'Studio',
   icon: 'studio',
-  match: (p) => p.startsWith('/studio') && !p.startsWith('/studio/collections'),
+  match: (p) =>
+    p.startsWith('/studio') &&
+    !p.startsWith('/studio/collections') &&
+    !p.startsWith('/studio/live'),
 };
 
-export const PRIMARY: NavItem[] = [HOME, COURSES, PREMIUM];
+export const LIVE: NavItem = {
+  href: '/live',
+  label: 'Live',
+  icon: 'live',
+  match: (p) => p.startsWith('/live'),
+};
+
+export const PRIMARY: NavItem[] = [HOME, LIVE, COURSES, PREMIUM];
 
 export const YOU: NavItem[] = [
   LIBRARY,
@@ -48,6 +58,12 @@ export const YOU: NavItem[] = [
 
 export const CREATOR: NavItem[] = [
   STUDIO,
+  {
+    href: '/studio/live',
+    label: 'Go live',
+    icon: 'live',
+    match: (p) => p.startsWith('/studio/live'),
+  },
   {
     href: '/studio/collections',
     label: 'Your courses',

@@ -2,6 +2,7 @@ import { CATEGORY_LABELS } from '@streamzw/shared';
 import Link from 'next/link';
 import CatalogClient from './components/CatalogClient';
 import {
+  API_BASE,
   fetchCatalog,
   fetchCollections,
   homeHref,
@@ -10,7 +11,18 @@ import {
   parseMode,
 } from './components/viewer/catalog';
 import FilterChips from './components/viewer/FilterChips';
-import { CollectionShelf, GridSection } from './components/viewer/VideoGrid';
+import VideoGrid, { CollectionShelf, GridSection } from './components/viewer/VideoGrid';
+import { Icon } from '../src/ui/icon';
+import type { Video } from '../src/types/api';
+
+async function fetchLiveNow(): Promise<Video[] | null> {
+  try {
+    const res = await fetch(`${API_BASE}/live?state=live`, { next: { revalidate: 15 } });
+    return res.ok ? (((await res.json()) as { items?: Video[] }).items ?? []) : null;
+  } catch {
+    return null;
+  }
+}
 
 const HINTS: Partial<Record<ModeKey, { text: string; link?: { href: string; label: string } }>> = {
   free: { text: 'Free to watch. You only spend data.' },
@@ -33,12 +45,14 @@ export default async function HomePage({
 }) {
   const sp = await searchParams;
   const filter = { mode: parseMode(sp.mode), category: parseCategory(sp.category) };
-  const [data, collections] = await Promise.all([
+  const [data, collections, liveNow] = await Promise.all([
     fetchCatalog(filter, null, { next: { revalidate: 60 } }),
     filter.mode === 'all'
       ? fetchCollections({ category: filter.category, limit: '12' }, { next: { revalidate: 60 } })
       : Promise.resolve(null),
+    fetchLiveNow(),
   ]);
+  const live = (liveNow ?? []).filter((v) => !filter.category || v.category === filter.category);
   const hint = HINTS[filter.mode];
   const shelfTitle =
     filter.category === 'education'
@@ -64,6 +78,23 @@ export default async function HomePage({
             </Link>
           )}
         </p>
+      )}
+      {live.length > 0 && (
+        <section aria-label="Live now" className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-4">
+            <h2 className="flex items-center gap-2 text-xl font-bold text-ink">
+              <Icon name="live" size={22} className="text-danger" />
+              Live now
+            </h2>
+            <Link
+              href="/live"
+              className="shrink-0 rounded-full px-3 py-1.5 text-sm font-semibold text-accent hover:bg-surface-2"
+            >
+              See all
+            </Link>
+          </div>
+          <VideoGrid videos={live.slice(0, 4)} label="Live now" />
+        </section>
       )}
       <CollectionShelf
         title={shelfTitle}
