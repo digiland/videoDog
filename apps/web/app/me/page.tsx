@@ -40,11 +40,17 @@ function asCurrency(c: string | null | undefined): Currency {
   return c === 'ZWG' || c === 'ZAR' ? c : 'USD';
 }
 
+/** What the API stores: lowercase, no leading @. */
+function cleanHandle(raw: string): string {
+  return raw.trim().replace(/^@/, '').toLowerCase();
+}
+
 export default function ProfilePage() {
   const router = useRouter();
   const [user, setUser] = useState<Me | null>(null);
   const [sub, setSub] = useState<CurrentSubscription | null | undefined>(undefined);
   const [displayName, setDisplayName] = useState('');
+  const [handle, setHandle] = useState('');
   const [currency, setCurrency] = useState<Currency>('USD');
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -61,6 +67,7 @@ export default function ProfilePage() {
         const me = await api.get<Me>('/users/me');
         setUser(me);
         setDisplayName(me.display_name ?? '');
+        setHandle(me.handle ?? '');
         setCurrency(asCurrency(me.preferred_display_currency));
       } catch {
         router.push('/sign-in?return_to=%2Fme');
@@ -73,6 +80,7 @@ export default function ProfilePage() {
   const dirty =
     !!user &&
     (displayName.trim() !== (user.display_name ?? '') ||
+      cleanHandle(handle) !== (user.handle ?? '') ||
       currency !== asCurrency(user.preferred_display_currency));
 
   async function handleSave(e: React.FormEvent) {
@@ -83,11 +91,15 @@ export default function ProfilePage() {
     setSaved(false);
     try {
       const name = displayName.trim();
-      await api.patch<User>('/users/me', {
+      const h = cleanHandle(handle);
+      const updated = await api.patch<User>('/users/me', {
         display_name: name || null,
         preferred_display_currency: currency,
+        // A handle can be changed but not removed: channel links depend on it.
+        ...(h && h !== user.handle ? { handle: h } : {}),
       });
-      setUser({ ...user, display_name: name || null, preferred_display_currency: currency });
+      setUser({ ...user, ...updated });
+      setHandle(updated.handle ?? '');
       setSaved(true);
     } catch (err: unknown) {
       setError(errorText(err, 'Not saved. Check your connection and try again.'));
@@ -158,6 +170,35 @@ export default function ProfilePage() {
             placeholder="The name people see"
             maxLength={60}
           />
+          {user.role !== 'viewer' && (
+            <Field
+              label="Channel handle"
+              name="handle"
+              prefix="@"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              value={handle}
+              onChange={(e) => {
+                setHandle(e.target.value);
+                setSaved(false);
+              }}
+              placeholder="your_channel"
+              maxLength={31}
+              hint={
+                user.handle ? (
+                  <>
+                    Your channel:{' '}
+                    <Link href={`/c/${user.handle}`} className="font-semibold text-accent">
+                      /c/{user.handle}
+                    </Link>
+                  </>
+                ) : (
+                  '3–30 letters, numbers, dots or underscores. This is your channel link.'
+                )
+              }
+            />
+          )}
           <div className="flex flex-col gap-1.5">
             <Segmented<Currency>
               legend="Show prices in"

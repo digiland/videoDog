@@ -1,7 +1,17 @@
 import { CONTENT_CATEGORIES, type ContentCategory } from '@streamzw/shared';
 import type { CollectionListResponse, VideoListResponse } from '../../../src/types/api';
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+const PUBLIC_API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:3001';
+
+/**
+ * Where to reach the API from here. Server renders use API_INTERNAL_BASE when set (in
+ * production, http://api:3001 on the compose network) instead of a round trip through the
+ * public domain; the browser always uses the public URL.
+ */
+export const API_BASE =
+  typeof window === 'undefined'
+    ? (process.env.API_INTERNAL_BASE ?? PUBLIC_API_BASE)
+    : PUBLIC_API_BASE;
 
 /** One page of the catalogue. 24 fills whole rows at 1, 2, 3 and 4 columns. */
 export const PAGE_SIZE = 24;

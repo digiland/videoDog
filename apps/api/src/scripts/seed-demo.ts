@@ -15,7 +15,7 @@
  */
 import { config } from 'dotenv';
 import { resolve, join } from 'path';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { spawnSync } from 'child_process';
 import { drizzle } from 'drizzle-orm/postgres-js';
@@ -317,7 +317,12 @@ function ffmpeg(args: string[]) {
   if (r.status !== 0) throw new Error(`ffmpeg failed: ${r.stderr.toString()}`);
 }
 
-const FONT = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+/** DejaVu Sans Bold: Debian/Ubuntu path, then Alpine (the API image). */
+const FONT =
+  [
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf',
+  ].find((f) => existsSync(f)) ?? 'DejaVuSans-Bold.ttf';
 
 /** Wrap a title to lines of ~22 characters for the title card. */
 function wrap(text: string, width = 22): string {

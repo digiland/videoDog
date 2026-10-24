@@ -1,0 +1,197 @@
+name: streamzw-prod
+
+# Production stack for one Linux VPS (CLAUDE.md §2: docker-compose until k8s post-MVP).
+#
+#   https://$DOMAIN         → web  (Next.js)
+#   https://api.$DOMAIN     → api  (NestJS + transcode / scheduler workers)
+#   https://media.$DOMAIN   → minio (presigned uploads, thumbnails, HLS segments)
+#
+# Postgres, Redis and MinIO are never published; only nginx listens on 80/443.
+# Runbook: docs/DEPLOY.md. Secrets: infra/.env.production (copy .env.production.example).
+
+x-restart: &restart
+  restart: unless-stopped
+
+services:
+  postgres:
+    <<: *restart
+    image: postgres:16
+    environment:
+      POSTGRES_USER: streamzw
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: streamzw
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U streamzw -d streamzw']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    # BullMQ state (transcode jobs, crons) must survive restarts.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    <<: *restart
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD}
+      MINIO_BROWSER_REDIRECT_URL: https://media.${DOMAIN}/console
+    volumes:
+      - minio-data:/data
+    # Console only on the host's loopback: reach it with `ssh -L 9001:localhost:9001`.
+    ports:
+      - '127.0.0.1:9001:9001'
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create the two private buckets (idempotent).
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - >
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing local/streamzw-videos &&
+        mc mb --ignore-existing local/streamzw-thumbs &&
+        mc anonymous set none local/streamzw-videos &&
+        mc anonymous set none local/streamzw-thumbs
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+
+  api:
+    <<: *restart
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    image: streamzw-api:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: postgres://streamzw:${POSTGRES_PASSWORD}@postgres:5432/streamzw
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_ENDPOINT: https://media.${DOMAIN}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET_VIDEOS: streamzw-videos
+      MINIO_BUCKET_THUMBS: streamzw-thumbs
+      PUBLIC_API_BASE: https://api.${DOMAIN}
+      CORS_ORIGINS: https://${DOMAIN}
+      PAYSTACK_CALLBACK_URL: https://${DOMAIN}/checkout/return
+      TRANSCODE_ENABLED: 'true'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3001/health || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  web:
+    <<: *restart
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: https://api.${DOMAIN}
+    image: streamzw-web:latest
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      # Server renders call the API on the compose network, not through the public domain.
+      API_INTERNAL_BASE: http://api:3001
+
+  nginx:
+    <<: *restart
+    image: nginx:1.27-alpine
+    depends_on:
+      - web
+      - api
+      - minio
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+    volumes:
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    # Pick up renewed certificates twice a day.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        (while :; do sleep 12h; nginx -s reload; done) &
+        exec /docker-entrypoint.sh nginx -g 'daemon off;'
+
+  certbot:
+    <<: *restart
+    image: certbot/certbot:v3.3.0
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      [
+        'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done',
+      ]
+
+  # Nightly pg_dump, kept 14 days in the `backups` volume. Copy them off the box too
+  # (docs/DEPLOY.md): a backup on the same disk is not a backup.
+  backup:
+    <<: *restart
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - backups:/backups
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        while :; do
+          f=/backups/streamzw-$$(date -u +%Y%m%dT%H%MZ).dump
+          pg_dump -h postgres -U streamzw -d streamzw -Fc -f "$$f.tmp" && mv "$$f.tmp" "$$f" && echo "backup ok: $$f"
+          find /backups -name 'streamzw-*.dump' -mtime +14 -delete
+          sleep 86400
+        done
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  certbot-etc:
+  certbot-www:
+  backups:

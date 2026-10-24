@@ -18,26 +18,35 @@ import type { Readable } from 'stream';
 @Injectable()
 export class StorageService {
   private readonly s3: S3Client;
+  /** Signs URLs that browsers use; differs from `s3` when storage sits behind a public host. */
+  private readonly presigner: S3Client;
   private readonly videoBucket: string;
   private readonly thumbBucket: string;
 
   constructor() {
     const endpoint = process.env.MINIO_ENDPOINT ?? 'http://localhost:9000';
+    // In production the API reaches MinIO on the internal network (http://minio:9000) while
+    // browsers fetch through https://media.<domain>. SigV4 signs the host, so URLs handed
+    // to browsers must be signed for the public host.
+    const publicEndpoint = process.env.MINIO_PUBLIC_ENDPOINT?.trim() || endpoint;
     const region = process.env.MINIO_REGION ?? 'us-east-1';
-    this.s3 = new S3Client({
-      endpoint,
-      region,
-      credentials: {
-        accessKeyId: process.env.MINIO_ACCESS_KEY ?? 'minioadmin',
-        secretAccessKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
-      },
-      forcePathStyle: true, // MinIO requires path-style
-      // AWS SDK ≥3.729 adds CRC checksums by default, sending streamed uploads as
-      // `aws-chunked` with a trailer. S3-compatible stores (MinIO/RustFS versions, test
-      // servers) may store those framing bytes inside the object, corrupting video files.
-      requestChecksumCalculation: 'WHEN_REQUIRED',
-      responseChecksumValidation: 'WHEN_REQUIRED',
-    });
+    const client = (ep: string) =>
+      new S3Client({
+        endpoint: ep,
+        region,
+        credentials: {
+          accessKeyId: process.env.MINIO_ACCESS_KEY ?? 'minioadmin',
+          secretAccessKey: process.env.MINIO_SECRET_KEY ?? 'minioadmin',
+        },
+        forcePathStyle: true, // MinIO requires path-style
+        // AWS SDK ≥3.729 adds CRC checksums by default, sending streamed uploads as
+        // `aws-chunked` with a trailer. S3-compatible stores (MinIO/RustFS versions, test
+        // servers) may store those framing bytes inside the object, corrupting video files.
+        requestChecksumCalculation: 'WHEN_REQUIRED',
+        responseChecksumValidation: 'WHEN_REQUIRED',
+      });
+    this.s3 = client(endpoint);
+    this.presigner = publicEndpoint === endpoint ? this.s3 : client(publicEndpoint);
     this.videoBucket = process.env.MINIO_BUCKET_VIDEOS ?? 'streamzw-videos';
     this.thumbBucket = process.env.MINIO_BUCKET_THUMBS ?? 'streamzw-thumbs';
   }
@@ -52,7 +61,7 @@ export class StorageService {
 
   async getPresignedPutUrl(bucket: string, key: string, ttlSeconds = 3600): Promise<string> {
     const cmd = new PutObjectCommand({ Bucket: bucket, Key: key });
-    return getSignedUrl(this.s3, cmd, { expiresIn: ttlSeconds });
+    return getSignedUrl(this.presigner, cmd, { expiresIn: ttlSeconds });
   }
 
   async objectExists(bucket: string, key: string): Promise<boolean> {
@@ -66,7 +75,7 @@ export class StorageService {
 
   async getPresignedGetUrl(bucket: string, key: string, ttlSeconds = 3600): Promise<string> {
     const cmd = new GetObjectCommand({ Bucket: bucket, Key: key });
-    return getSignedUrl(this.s3, cmd, { expiresIn: ttlSeconds });
+    return getSignedUrl(this.presigner, cmd, { expiresIn: ttlSeconds });
   }
 
   async uploadBuffer(
@@ -133,7 +142,7 @@ export class StorageService {
 
   presignPart(bucket: string, key: string, uploadId: string, partNumber: number, ttl: number) {
     return getSignedUrl(
-      this.s3,
+      this.presigner,
       new UploadPartCommand({
         Bucket: bucket,
         Key: key,

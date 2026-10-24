@@ -17,7 +17,8 @@ RUN pnpm --filter api build
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-RUN corepack enable
+# The transcode worker runs in this process and shells out to ffmpeg/ffprobe.
+RUN apk add --no-cache ffmpeg font-dejavu && corepack enable
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json

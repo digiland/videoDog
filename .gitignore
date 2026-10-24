@@ -28,3 +28,7 @@ pnpm-debug.log*
 .husky/_/
 .claude/
 dump.rdb
+
+# Production secrets (the .example stays tracked)
+.env.production
+infra/.env.production

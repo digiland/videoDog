@@ -12,7 +12,7 @@ import { NationalIdCrypto, normaliseZimNationalId } from './national-id.crypto';
 const PHONE_E164 = /^\+[1-9]\d{1,14}$/;
 
 const UpdateUserSchema = z.object({
-  display_name: z.string().min(1).max(100).optional(),
+  display_name: z.string().trim().min(1).max(100).nullable().optional(),
   handle: z
     .string()
     .transform((h) => h.trim().replace(/^@/, '').toLowerCase())
