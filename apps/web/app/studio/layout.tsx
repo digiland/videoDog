@@ -10,6 +10,7 @@ const TABS = [
   { href: '/studio', label: 'Overview', exact: true },
   { href: '/studio/upload', label: 'Upload' },
   { href: '/studio/videos', label: 'Videos' },
+  { href: '/studio/collections', label: 'Courses & playlists' },
   { href: '/studio/earnings', label: 'Earnings' },
   { href: '/studio/payouts', label: 'Payouts' },
 ] as const;

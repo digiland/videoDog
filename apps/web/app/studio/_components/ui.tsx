@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Icon } from '../../../src/ui/icon';
+import type { CollectionSummary } from '../../../src/types/api';
 import type { VideoState } from './studio-data';
 
 const STATE: Record<VideoState, { label: string; tone: string }> = {
@@ -102,5 +103,24 @@ export function VideoThumb({ src, className }: { src: string | null; className?:
         </span>
       )}
     </div>
+  );
+}
+
+const STATE_LABEL: Record<CollectionSummary['state'], { label: string; tone: string }> = {
+  draft: { label: 'Draft', tone: 'text-ink-2' },
+  published: { label: 'Published', tone: 'text-sage' },
+  unpublished: { label: 'Unpublished', tone: 'text-ink-3' },
+};
+
+/** Draft / published / unpublished for a course or playlist. */
+export function CollectionStateChip({ state }: { state: CollectionSummary['state'] }) {
+  const s = STATE_LABEL[state];
+  return (
+    <span
+      className={`inline-flex h-6 items-center gap-1.5 rounded-full bg-surface-2 px-2 text-xs font-semibold ${s.tone}`}
+    >
+      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-current" />
+      {s.label}
+    </span>
   );
 }

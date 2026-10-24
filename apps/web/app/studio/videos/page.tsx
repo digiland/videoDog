@@ -22,8 +22,16 @@ import {
   shortDate,
 } from '../_components/studio-data';
 import { PageTitle, StateChip, VideoThumb } from '../_components/ui';
+import { CategorySelect } from '../_components/CategorySelect';
+import type { ContentCategory } from '@streamzw/shared';
 
-type Edit = { title: string; mode: AccessMode; price: string; thumb: File | null };
+type Edit = {
+  title: string;
+  category: ContentCategory;
+  mode: AccessMode;
+  price: string;
+  thumb: File | null;
+};
 
 function priceOf(v: Video) {
   return v.ppv_price_minor_units && v.ppv_price_currency
@@ -303,6 +311,7 @@ function EditPanel({
 }) {
   const [edit, setEdit] = useState<Edit>({
     title: video.title,
+    category: video.category ?? 'other',
     mode: video.access_mode,
     price: video.ppv_price_minor_units ? formatMinorToMajorInput(video.ppv_price_minor_units) : '',
     thumb: null,
@@ -318,6 +327,7 @@ function EditPanel({
     if (!title) return setError('Give the video a title.');
     const body: Record<string, unknown> = {
       title,
+      category: edit.category,
       access_mode: edit.mode,
       ppv_price_minor_units: null,
       ppv_price_currency: null,
@@ -359,6 +369,11 @@ function EditPanel({
         value={edit.title}
         maxLength={255}
         onChange={(e) => setEdit((s) => ({ ...s, title: e.target.value }))}
+      />
+      <CategorySelect
+        id={`edit-${video.id}-category`}
+        value={edit.category}
+        onChange={(category) => setEdit((s) => ({ ...s, category }))}
       />
       <AccessModePicker
         idPrefix={`edit-${video.id}`}

@@ -15,6 +15,7 @@ import { Field } from '../../../src/ui/field';
 import { Icon, type IconName } from '../../../src/ui/icon';
 import { Notice } from '../../../src/ui/notice';
 import { AccessModePicker } from '../_components/AccessModePicker';
+import { CategorySelect } from '../_components/CategorySelect';
 import {
   type AccessMode,
   errorMessage,
@@ -30,7 +31,13 @@ import {
   type UploadView,
 } from '../_components/use-resumable-upload';
 
-const EMPTY_DRAFT: UploadDraft = { title: '', description: '', access_mode: 'free', price: '' };
+const EMPTY_DRAFT: UploadDraft = {
+  title: '',
+  description: '',
+  access_mode: 'free',
+  price: '',
+  category: 'other',
+};
 
 export default function UploadPage() {
   const up = useResumableUpload();
@@ -109,6 +116,7 @@ export default function UploadPage() {
       title: title.slice(0, 255),
       description: draft.description.trim(),
       access_mode: draft.access_mode,
+      category: draft.category ?? 'other',
       ppv_price_minor_units: null,
       ppv_price_currency: null,
     };
@@ -221,6 +229,11 @@ export default function UploadPage() {
             value={draft.description}
             onChange={(v) => set('description', v)}
             hint="Optional. Who's in it, where, what to expect."
+          />
+          <CategorySelect
+            id="upload-category"
+            value={draft.category ?? 'other'}
+            onChange={(c) => set('category', c)}
           />
           <AccessModePicker
             idPrefix="upload"

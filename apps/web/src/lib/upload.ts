@@ -1,3 +1,5 @@
+import type { ContentCategory } from '@streamzw/shared';
+
 /**
  * Resumable multipart upload — the pure parts (planning, retry schedule, resume matching,
  * a small concurrency pool) plus one browser helper that PUTs a part with progress.
@@ -106,6 +108,8 @@ export type UploadDraft = {
   description: string;
   access_mode: 'free' | 'ppv' | 'premium' | 'premium_buyable';
   price: string;
+  /** Optional so drafts saved before categories existed still resume. */
+  category?: ContentCategory;
 };
 
 export type ResumeRecord = {
