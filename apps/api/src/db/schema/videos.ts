@@ -49,6 +49,7 @@ export const videos = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    unique('videos_id_owner_key').on(t.id, t.ownerId), // target for collection_items' FK
     index('videos_published_idx').on(t.publishedAt),
     index('videos_premium_pool_idx').on(t.inPremiumPool),
   ],

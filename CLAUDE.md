@@ -442,6 +442,44 @@ CREATE TABLE watch_minutes_daily (
   PRIMARY KEY (date, video_id)
 );
 CREATE INDEX watch_minutes_daily_video_idx ON watch_minutes_daily (video_id, date);
+
+-- COLLECTIONS (courses + playlists; full DDL in infra/migrations/0015_collections.sql)
+-- Grouping only: no price of its own; access stays per video via checkAccess (§3.9).
+CREATE TYPE collection_kind AS ENUM ('course','playlist');
+CREATE TYPE collection_state AS ENUM ('draft','published','unpublished');
+
+CREATE TABLE collections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id uuid NOT NULL REFERENCES users(id),
+  kind collection_kind NOT NULL,
+  title text NOT NULL,
+  description text,
+  thumbnail_key text,
+  state collection_state NOT NULL DEFAULT 'draft',
+  search_doc tsvector GENERATED ALWAYS AS (...) STORED,  -- same weighting as videos
+  published_at timestamptz,
+  ...
+);
+
+-- Courses only (a playlist can never have sections).
+CREATE TABLE collection_sections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id uuid NOT NULL,                        -- FK (collection_id,'course') → collections(id,kind)
+  title text NOT NULL,
+  position int NOT NULL,                              -- UNIQUE per collection, DEFERRABLE
+  ...
+);
+
+CREATE TABLE collection_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  collection_id uuid NOT NULL,
+  owner_id uuid NOT NULL,                             -- FKs (collection_id,owner_id) + (video_id,owner_id): own videos only
+  video_id uuid NOT NULL,
+  section_id uuid,                                    -- FK (section_id,collection_id); NULL = unsectioned
+  position int NOT NULL,                              -- UNIQUE NULLS NOT DISTINCT (collection_id,section_id,position), DEFERRABLE
+  ...,
+  UNIQUE (collection_id, video_id)
+);
 ```
 
 ---
