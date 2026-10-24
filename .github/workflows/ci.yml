@@ -91,3 +91,11 @@ jobs:
           build-args: NEXT_PUBLIC_API_BASE=https://api.example.com
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
+      - name: Build live server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/live/Dockerfile
+          push: false
+          cache-from: type=gha,scope=live
+          cache-to: type=gha,mode=max,scope=live

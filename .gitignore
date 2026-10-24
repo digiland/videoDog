@@ -36,3 +36,4 @@ infra/.env.production
 # Playwright
 test-results/
 playwright-report/
+infra/live/.env.live

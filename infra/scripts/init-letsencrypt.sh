@@ -6,13 +6,23 @@
 # Usage (from the repo root, DNS for $DOMAIN, api.$DOMAIN and media.$DOMAIN already
 # pointing at this server):
 #   bash infra/scripts/init-letsencrypt.sh you@example.com
+# On the live server (one host, LIVE_DOMAIN):
+#   ENV_FILE=infra/live/.env.live COMPOSE_FILE=infra/live/docker-compose.live.yml \
+#   DOMAIN_VAR=LIVE_DOMAIN HOSTS=single bash infra/scripts/init-letsencrypt.sh you@example.com
 set -euo pipefail
 
 EMAIL="${1:?usage: init-letsencrypt.sh <email for expiry notices>}"
-ENV_FILE="infra/.env.production"
-COMPOSE=(docker compose --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml)
-DOMAIN="$(grep -E '^DOMAIN=' "$ENV_FILE" | cut -d= -f2-)"
-[ -n "$DOMAIN" ] || { echo "DOMAIN is not set in $ENV_FILE" >&2; exit 1; }
+ENV_FILE="${ENV_FILE:-infra/.env.production}"
+COMPOSE_FILE="${COMPOSE_FILE:-infra/docker-compose.prod.yml}"
+DOMAIN_VAR="${DOMAIN_VAR:-DOMAIN}"
+COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+DOMAIN="$(grep -E "^${DOMAIN_VAR}=" "$ENV_FILE" | cut -d= -f2-)"
+[ -n "$DOMAIN" ] || { echo "$DOMAIN_VAR is not set in $ENV_FILE" >&2; exit 1; }
+if [ "${HOSTS:-}" = "single" ]; then
+  CERT_ARGS=(-d "$DOMAIN")
+else
+  CERT_ARGS=(-d "$DOMAIN" -d "api.$DOMAIN" -d "media.$DOMAIN")
+fi
 LIVE="/etc/letsencrypt/live/$DOMAIN"
 
 echo "→ Temporary self-signed certificate for $DOMAIN"
@@ -32,7 +42,7 @@ echo "→ Removing the temporary certificate"
 echo "→ Requesting the real certificate"
 "${COMPOSE[@]}" run --rm --entrypoint certbot certbot certonly --webroot -w /var/www/certbot \
   --email "$EMAIL" --agree-tos --no-eff-email --non-interactive \
-  -d "$DOMAIN" -d "api.$DOMAIN" -d "media.$DOMAIN"
+  "${CERT_ARGS[@]}"
 
 echo "→ Reloading nginx"
 "${COMPOSE[@]}" exec nginx nginx -s reload

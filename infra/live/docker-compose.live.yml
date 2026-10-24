@@ -1,0 +1,77 @@
+name: streamzw-live
+
+# The live server: a separate box from the main stack (docs/DEPLOY.md §12), so a 4K event
+# can't starve the API or VOD transcoding. Creators publish to it; viewers fetch HLS from it,
+# normally through a BunnyCDN pull zone.
+#
+#   rtmp://LIVE_DOMAIN/live          (OBS: stream key `<id>?user=key&pass=<key>`)
+#   srt://LIVE_DOMAIN:8890           (streamid=publish:live/<id>:key:<key>)
+#   https://LIVE_DOMAIN/hls/...      (signed HLS origin)
+#
+# docker compose --env-file infra/live/.env.live -f infra/live/docker-compose.live.yml up -d
+
+services:
+  live:
+    restart: unless-stopped
+    build:
+      context: ../..
+      dockerfile: infra/live/Dockerfile
+    image: streamzw-live:latest
+    env_file: .env.live
+    environment:
+      MTX_AUTHHTTPADDRESS: ${LIVE_API_BASE}/live/ingest/auth?secret=${LIVE_INGEST_SECRET}
+      LIVE_HLS_DIR: /var/hls
+      LIVE_RTSP_BASE: rtsp://127.0.0.1:8554
+    ports:
+      - '1935:1935'
+      - '8890:8890/udp'
+    volumes:
+      - hls:/var/hls
+    # GPU boxes: uncomment (needs the NVIDIA container toolkit) and set LIVE_ENCODER=h264_nvenc.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu, video]
+
+  nginx:
+    restart: unless-stopped
+    image: nginx:1.27-alpine
+    depends_on: [live]
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      LIVE_DOMAIN: ${LIVE_DOMAIN:?set LIVE_DOMAIN}
+      LIVE_SIGNING_SECRET: ${LIVE_SIGNING_SECRET:?set LIVE_SIGNING_SECRET}
+    volumes:
+      - ./nginx:/etc/nginx/templates:ro
+      - hls:/var/hls:ro
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    command:
+      - /bin/sh
+      - -c
+      - |
+        (while :; do sleep 12h; nginx -s reload; done) &
+        exec /docker-entrypoint.sh nginx -g 'daemon off;'
+
+  certbot:
+    restart: unless-stopped
+    image: certbot/certbot:v3.3.0
+    volumes:
+      - certbot-etc:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      [
+        'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done',
+      ]
+
+volumes:
+  # A 4K event with the full ladder writes ~13 GB/hour until the replay is uploaded.
+  hls:
+  certbot-etc:
+  certbot-www:

@@ -1,0 +1,48 @@
+# Live HLS origin. Rendered by the nginx image (envsubst: ${LIVE_DOMAIN}, ${LIVE_SIGNING_SECRET}).
+#
+# URLs: /hls/<token>/<expires>/<stream>/<file>. The API signs token = md5("<expires><stream>
+# <secret>") (LivePlaybackService); the token covers the whole stream directory, so the
+# relative rendition/segment URIs inside playlists carry it automatically. Expiries are
+# shared hourly buckets, so BunnyCDN in front can cache one copy for every viewer.
+
+map $live_file $live_cache {
+  ~\.m3u8$  "public, max-age=1";
+  default   "public, max-age=86400, immutable";
+}
+
+server {
+  listen 80;
+  server_name ${LIVE_DOMAIN};
+  location /.well-known/acme-challenge/ { root /var/www/certbot; }
+  location / { return 301 https://$host$request_uri; }
+}
+
+server {
+  listen 443 ssl;
+  http2 on;
+  server_name ${LIVE_DOMAIN};
+  ssl_certificate     /etc/letsencrypt/live/${LIVE_DOMAIN}/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/${LIVE_DOMAIN}/privkey.pem;
+  ssl_protocols TLSv1.2 TLSv1.3;
+
+  types {
+    application/vnd.apple.mpegurl m3u8;
+    video/mp2t ts;
+  }
+
+  location ~ "^/hls/(?<live_token>[A-Za-z0-9_-]+)/(?<live_expires>[0-9]+)/(?<live_stream>[0-9a-f-]{36})/(?<live_file>master\.m3u8|[0-9]{3,4}p/(index\.m3u8|seg[0-9]+\.ts))$" {
+    secure_link $live_token,$live_expires;
+    secure_link_md5 "$live_expires$live_stream ${LIVE_SIGNING_SECRET}";
+    if ($secure_link = "")  { return 403; }
+    if ($secure_link = "0") { return 410; }
+
+    alias /var/hls/$live_stream/$live_file;
+    add_header Cache-Control $live_cache always;
+    add_header Access-Control-Allow-Origin * always;
+    add_header Access-Control-Allow-Methods "GET, HEAD, OPTIONS" always;
+    if ($request_method = OPTIONS) { return 204; }
+  }
+
+  location = /health { return 200 "ok\n"; }
+  location / { return 404; }
+}

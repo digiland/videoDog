@@ -107,6 +107,10 @@ services:
       CORS_ORIGINS: https://${DOMAIN}
       PAYSTACK_CALLBACK_URL: https://${DOMAIN}/checkout/return
       TRANSCODE_ENABLED: 'true'
+      # Live server (infra/live): where creators publish, and where players fetch live HLS
+      # (set LIVE_PUBLIC_BASE to a BunnyCDN pull zone in front of it to scale viewers).
+      LIVE_INGEST_HOST: ${LIVE_DOMAIN:-live.${DOMAIN}}
+      LIVE_PUBLIC_BASE: ${LIVE_PUBLIC_BASE:-https://live.${DOMAIN}}
     healthcheck:
       test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3001/health || exit 1']
       interval: 15s

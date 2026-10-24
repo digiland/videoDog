@@ -1,0 +1,28 @@
+# MediaMTX on the live server. Creators publish RTMP or SRT; the live worker reads the feed
+# back over RTSP on loopback and produces the HLS ladder. MediaMTX serves no viewers itself.
+# Any key here can be overridden from the environment as MTX_<KEY> (e.g. MTX_AUTHHTTPADDRESS).
+logLevel: info
+
+# Every publish/read is authorised by the API (stream key check; reads only from loopback).
+authMethod: http
+authHTTPAddress: http://api:3001/live/ingest/auth?secret=CHANGE_ME
+
+rtmp: yes
+rtmpAddress: :1935
+srt: yes
+srtAddress: :8890
+rtsp: yes
+rtspAddress: 127.0.0.1:8554
+rtspTransports: [tcp]
+hls: no
+webrtc: no
+
+# Prometheus metrics for monitoring (loopback only).
+metrics: yes
+metricsAddress: 127.0.0.1:9998
+
+paths:
+  # Only our stream paths exist: live/<stream uuid>. Anything else is refused.
+  '~^live/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$':
+    runOnReady: node /app/apps/api/dist/live-worker/worker.js
+    runOnReadyRestart: no
